@@ -5,9 +5,13 @@
 #include <linux/io.h>
 #include <linux/mmc/host.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 
 #include "sdhci-pltfm.h"
+#include "sdhci.h"
+
+static unsigned bus_div_override = 0;
 
 static u16 sdhci_bflb_readw(struct sdhci_host *host, int reg)
 {
@@ -37,6 +41,28 @@ static u32 sdhci_bflb_readl(struct sdhci_host *host, int reg)
 		break;
 	}
 	return ret;
+}
+
+static void sdhci_bflb_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
+{
+	struct sdhci_host *host = mmc_priv(mmc);
+	unsigned old, new;
+
+	sdhci_set_ios(mmc, ios);
+
+	if (bus_div_override) {
+		old = new = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
+		new &= ~(SDHCI_DIV_MASK << SDHCI_DIVIDER_SHIFT |
+		    (SDHCI_DIV_HI_MASK >> SDHCI_DIV_MASK_LEN)
+		    << SDHCI_DIVIDER_HI_SHIFT);
+		    new |= ((bus_div_override - 1) & SDHCI_DIV_MASK)
+		    << SDHCI_DIVIDER_SHIFT;
+		new |= (((bus_div_override - 1) & SDHCI_DIV_HI_MASK) >>
+		    SDHCI_DIV_MASK_LEN) << SDHCI_DIVIDER_HI_SHIFT;
+		dev_info(mmc_dev(mmc),
+		    "SDHCI_CLOCK_CONTROL: 0x%04x -> 0x%04x\n", old, new);
+		sdhci_writew(host, new, SDHCI_CLOCK_CONTROL);
+	}
 }
 
 static const struct sdhci_ops sdhci_bflb_ops = {
@@ -74,6 +100,8 @@ static int sdhci_bflb_probe(struct platform_device *pdev)
 	if (!IS_ERR(pltfm_host->clk))
 		clk_prepare_enable(pltfm_host->clk);
 
+	host->mmc_host_ops.set_ios = sdhci_bflb_set_ios;
+
 	ret = mmc_of_parse(host->mmc);
 	if (ret)
 		goto err_sdhci_add;
@@ -108,6 +136,7 @@ static struct platform_driver sdhci_bflb_driver = {
 };
 
 module_platform_driver(sdhci_bflb_driver);
+module_param_hw_named(bus_div, bus_div_override, uint, other, 0444);
 
 MODULE_DESCRIPTION("SDHCI driver for Bflb");
 MODULE_LICENSE("GPL v2");
