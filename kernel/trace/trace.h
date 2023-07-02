@@ -25,7 +25,7 @@
 #include "pid_list.h"
 
 #ifdef CONFIG_FTRACE_SYSCALLS
-#include <asm/unistd.h>		/* For NR_SYSCALLS	     */
+#include <asm/unistd.h>		/* For NR_syscalls	     */
 #include <asm/syscall.h>	/* some archs define it here */
 #endif
 
@@ -113,6 +113,10 @@ enum trace_type {
 #define MEM_FAIL(condition, fmt, ...)					\
 	DO_ONCE_LITE_IF(condition, pr_err, "ERROR: " fmt, ##__VA_ARGS__)
 
+#define HIST_STACKTRACE_DEPTH	16
+#define HIST_STACKTRACE_SIZE	(HIST_STACKTRACE_DEPTH * sizeof(unsigned long))
+#define HIST_STACKTRACE_SKIP	5
+
 /*
  * syscalls are special, and need special handling, this is why
  * they are not included in trace_entries.h
@@ -139,6 +143,17 @@ struct eprobe_trace_entry_head {
 };
 
 struct kretprobe_trace_entry_head {
+	struct trace_entry	ent;
+	unsigned long		func;
+	unsigned long		ret_ip;
+};
+
+struct fentry_trace_entry_head {
+	struct trace_entry	ent;
+	unsigned long		ip;
+};
+
+struct fexit_trace_entry_head {
 	struct trace_entry	ent;
 	unsigned long		func;
 	unsigned long		ret_ip;
@@ -615,6 +630,7 @@ bool trace_is_tracepoint_string(const char *str);
 const char *trace_event_format(struct trace_iterator *iter, const char *fmt);
 void trace_check_vprintf(struct trace_iterator *iter, const char *fmt,
 			 va_list ap) __printf(2, 0);
+char *trace_iter_expand_format(struct trace_iterator *iter);
 
 int trace_empty(struct trace_iterator *iter);
 
@@ -827,6 +843,8 @@ static __always_inline bool ftrace_hash_empty(struct ftrace_hash *hash)
 #define TRACE_GRAPH_PRINT_TAIL          0x100
 #define TRACE_GRAPH_SLEEP_TIME          0x200
 #define TRACE_GRAPH_GRAPH_TIME          0x400
+#define TRACE_GRAPH_PRINT_RETVAL        0x800
+#define TRACE_GRAPH_PRINT_RETVAL_HEX    0x1000
 #define TRACE_GRAPH_PRINT_FILL_SHIFT	28
 #define TRACE_GRAPH_PRINT_FILL_MASK	(0x3 << TRACE_GRAPH_PRINT_FILL_SHIFT)
 
@@ -1195,6 +1213,7 @@ extern int trace_get_user(struct trace_parser *parser, const char __user *ubuf,
 		C(HEX,			"hex"),			\
 		C(BIN,			"bin"),			\
 		C(BLOCK,		"block"),		\
+		C(FIELDS,		"fields"),		\
 		C(PRINTK,		"trace_printk"),	\
 		C(ANNOTATE,		"annotate"),		\
 		C(USERSTACKTRACE,	"userstacktrace"),	\
@@ -1330,6 +1349,8 @@ DECLARE_PER_CPU(struct ring_buffer_event *, trace_buffered_event);
 DECLARE_PER_CPU(int, trace_buffered_event_cnt);
 void trace_buffered_event_disable(void);
 void trace_buffered_event_enable(void);
+
+void early_enable_events(struct trace_array *tr, char *buf, bool disable_first);
 
 static inline void
 __trace_event_discard_commit(struct trace_buffer *buffer,

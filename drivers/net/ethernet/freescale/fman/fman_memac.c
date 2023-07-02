@@ -976,14 +976,10 @@ static int memac_init(struct fman_mac *memac)
 
 static void pcs_put(struct phylink_pcs *pcs)
 {
-	struct mdio_device *mdiodev;
-
 	if (IS_ERR_OR_NULL(pcs))
 		return;
 
-	mdiodev = lynx_get_mdio_device(pcs);
 	lynx_pcs_destroy(pcs);
-	mdio_device_free(mdiodev);
 }
 
 static int memac_free(struct fman_mac *memac)
@@ -1043,20 +1039,14 @@ static struct phylink_pcs *memac_pcs_create(struct device_node *mac_node,
 					    int index)
 {
 	struct device_node *node;
-	struct mdio_device *mdiodev = NULL;
 	struct phylink_pcs *pcs;
 
 	node = of_parse_phandle(mac_node, "pcsphy-handle", index);
-	if (node && of_device_is_available(node))
-		mdiodev = of_mdio_find_device(node);
+	if (!node)
+		return ERR_PTR(-ENODEV);
+
+	pcs = lynx_pcs_create_fwnode(of_fwnode_handle(node));
 	of_node_put(node);
-
-	if (!mdiodev)
-		return ERR_PTR(-EPROBE_DEFER);
-
-	pcs = lynx_pcs_create(mdiodev);
-	if (!pcs)
-		mdio_device_free(mdiodev);
 
 	return pcs;
 }
@@ -1155,13 +1145,12 @@ int memac_initialization(struct mac_device *mac_dev,
 	else
 		memac->sgmii_pcs = pcs;
 
-	memac->serdes = devm_of_phy_get(mac_dev->dev, mac_node, "serdes");
-	err = PTR_ERR(memac->serdes);
-	if (err == -ENODEV || err == -ENOSYS) {
+	memac->serdes = devm_of_phy_optional_get(mac_dev->dev, mac_node,
+						 "serdes");
+	if (!memac->serdes) {
 		dev_dbg(mac_dev->dev, "could not get (optional) serdes\n");
-		memac->serdes = NULL;
 	} else if (IS_ERR(memac->serdes)) {
-		dev_err_probe(mac_dev->dev, err, "could not get serdes\n");
+		err = PTR_ERR(memac->serdes);
 		goto _return_fm_mac_free;
 	}
 

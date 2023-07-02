@@ -123,7 +123,7 @@ void snd_hdac_device_exit(struct hdac_device *dev);
 int snd_hdac_device_register(struct hdac_device *codec);
 void snd_hdac_device_unregister(struct hdac_device *codec);
 int snd_hdac_device_set_chip_name(struct hdac_device *codec, const char *name);
-int snd_hdac_codec_modalias(struct hdac_device *hdac, char *buf, size_t size);
+int snd_hdac_codec_modalias(const struct hdac_device *hdac, char *buf, size_t size);
 
 int snd_hdac_refresh_widgets(struct hdac_device *codec);
 
@@ -347,6 +347,8 @@ struct hdac_bus {
 	bool corbrp_self_clear:1;	/* CORBRP clears itself after reset */
 	bool polling_mode:1;
 	bool needs_damn_long_delay:1;
+	bool not_use_interrupts:1;	/* prohibiting the RIRB IRQ */
+	bool access_sdnctl_in_dword:1;	/* accessing the sdnctl register by dword */
 
 	int poll_count;
 
@@ -575,7 +577,7 @@ void snd_hdac_stream_cleanup(struct hdac_stream *azx_dev);
 int snd_hdac_stream_setup_periods(struct hdac_stream *azx_dev);
 int snd_hdac_stream_set_params(struct hdac_stream *azx_dev,
 				unsigned int format_val);
-void snd_hdac_stream_start(struct hdac_stream *azx_dev, bool fresh_start);
+void snd_hdac_stream_start(struct hdac_stream *azx_dev);
 void snd_hdac_stream_stop(struct hdac_stream *azx_dev);
 void snd_hdac_stop_streams(struct hdac_bus *bus);
 void snd_hdac_stop_streams_and_chip(struct hdac_bus *bus);

@@ -10,14 +10,13 @@ menuconfig DRM
 	depends on (AGP || AGP=n) && !EMULATED_CMPXCHG && HAS_DMA
 	select DRM_PANEL_ORIENTATION_QUIRKS
 	select HDMI
-	select FB_CMDLINE
 	select I2C
-	select I2C_ALGOBIT
 	select DMA_SHARED_BUFFER
 	select SYNC_FILE
 # gallium uses SYS_kcmp for os_same_file_description() to de-duplicate
 # device and dmabuf fd. Let's make sure that is available for our userspace.
 	select KCMP
+	select VIDEO_CMDLINE
 	select VIDEO_NOMODESET
 	help
 	  Kernel-level support for the Direct Rendering Infrastructure (DRI)
@@ -64,6 +63,12 @@ config DRM_USE_DYNAMIC_DEBUG
 	  bytes per callsite, the .data costs can be substantial, and
 	  are therefore configurable.
 
+config DRM_KUNIT_TEST_HELPERS
+	tristate
+	depends on DRM && KUNIT
+	help
+	  KUnit Helpers for KMS drivers.
+
 config DRM_KUNIT_TEST
 	tristate "KUnit tests for DRM" if !KUNIT_ALL_TESTS
 	depends on DRM && KUNIT
@@ -74,6 +79,7 @@ config DRM_KUNIT_TEST
 	select DRM_KMS_HELPER
 	select DRM_BUDDY
 	select DRM_EXPORT_FOR_TESTS if m
+	select DRM_KUNIT_TEST_HELPERS
 	default KUNIT_ALL_TESTS
 	help
 	  This builds unit tests for DRM. This option is not useful for
@@ -89,6 +95,7 @@ config DRM_KUNIT_TEST
 config DRM_KMS_HELPER
 	tristate
 	depends on DRM
+	select FB_SYS_HELPERS_DEFERRED if DRM_FBDEV_EMULATION
 	help
 	  CRTC helpers for KMS drivers.
 
@@ -126,14 +133,6 @@ config DRM_FBDEV_EMULATION
 	bool "Enable legacy fbdev support for your modesetting driver"
 	depends on DRM_KMS_HELPER
 	depends on FB=y || FB=DRM_KMS_HELPER
-	select FB_CFB_FILLRECT
-	select FB_CFB_COPYAREA
-	select FB_CFB_IMAGEBLIT
-	select FB_DEFERRED_IO
-	select FB_SYS_FOPS
-	select FB_SYS_FILLRECT
-	select FB_SYS_COPYAREA
-	select FB_SYS_IMAGEBLIT
 	select FRAMEBUFFER_CONSOLE if !EXPERT
 	select FRAMEBUFFER_CONSOLE_DETECT_PRIMARY if FRAMEBUFFER_CONSOLE
 	default y
@@ -217,6 +216,7 @@ config DRM_TTM_HELPER
 config DRM_GEM_DMA_HELPER
 	tristate
 	depends on DRM
+	select FB_SYS_HELPERS if DRM_FBDEV_EMULATION
 	help
 	  Choose this if you need the GEM DMA helper functions
 
@@ -225,6 +225,10 @@ config DRM_GEM_SHMEM_HELPER
 	depends on DRM && MMU
 	help
 	  Choose this if you need the GEM shmem helper functions
+
+config DRM_SUBALLOC_HELPER
+	tristate
+	depends on DRM
 
 config DRM_SCHED
 	tristate
@@ -285,9 +289,7 @@ source "drivers/gpu/drm/armada/Kconfig"
 
 source "drivers/gpu/drm/atmel-hlcdc/Kconfig"
 
-source "drivers/gpu/drm/rcar-du/Kconfig"
-
-source "drivers/gpu/drm/shmobile/Kconfig"
+source "drivers/gpu/drm/renesas/Kconfig"
 
 source "drivers/gpu/drm/sun4i/Kconfig"
 
@@ -392,64 +394,7 @@ menuconfig DRM_LEGACY
 	  Unless you have strong reasons to go rogue, say "N".
 
 if DRM_LEGACY
-
-config DRM_TDFX
-	tristate "3dfx Banshee/Voodoo3+"
-	depends on DRM && PCI
-	help
-	  Choose this option if you have a 3dfx Banshee or Voodoo3 (or later),
-	  graphics card.  If M is selected, the module will be called tdfx.
-
-config DRM_R128
-	tristate "ATI Rage 128"
-	depends on DRM && PCI
-	select FW_LOADER
-	help
-	  Choose this option if you have an ATI Rage 128 graphics card.  If M
-	  is selected, the module will be called r128.  AGP support for
-	  this card is strongly suggested (unless you have a PCI version).
-
-config DRM_I810
-	tristate "Intel I810"
-	# !PREEMPTION because of missing ioctl locking
-	depends on DRM && AGP && AGP_INTEL && (!PREEMPTION || BROKEN)
-	help
-	  Choose this option if you have an Intel I810 graphics card.  If M is
-	  selected, the module will be called i810.  AGP support is required
-	  for this driver to work.
-
-config DRM_MGA
-	tristate "Matrox g200/g400"
-	depends on DRM && PCI
-	select FW_LOADER
-	help
-	  Choose this option if you have a Matrox G200, G400 or G450 graphics
-	  card.  If M is selected, the module will be called mga.  AGP
-	  support is required for this driver to work.
-
-config DRM_SIS
-	tristate "SiS video cards"
-	depends on DRM && AGP
-	depends on FB_SIS || FB_SIS=n
-	help
-	  Choose this option if you have a SiS 630 or compatible video
-	  chipset. If M is selected the module will be called sis. AGP
-	  support is required for this driver to work.
-
-config DRM_VIA
-	tristate "Via unichrome video cards"
-	depends on DRM && PCI
-	help
-	  Choose this option if you have a Via unichrome or compatible video
-	  chipset. If M is selected the module will be called via.
-
-config DRM_SAVAGE
-	tristate "Savage video cards"
-	depends on DRM && PCI
-	help
-	  Choose this option if you have a Savage3D/4/SuperSavage/Pro/Twister
-	  chipset. If M is selected the module will be called savage.
-
+# leave here to list legacy drivers
 endif # DRM_LEGACY
 
 config DRM_EXPORT_FOR_TESTS

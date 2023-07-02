@@ -123,9 +123,8 @@ void nvme_mpath_start_request(struct request *rq)
 		return;
 
 	nvme_req(rq)->flags |= NVME_MPATH_IO_STATS;
-	nvme_req(rq)->start_time = bdev_start_io_acct(disk->part0,
-					blk_rq_bytes(rq) >> SECTOR_SHIFT,
-					req_op(rq), jiffies);
+	nvme_req(rq)->start_time = bdev_start_io_acct(disk->part0, req_op(rq),
+						      jiffies);
 }
 EXPORT_SYMBOL_GPL(nvme_mpath_start_request);
 
@@ -136,7 +135,8 @@ void nvme_mpath_end_request(struct request *rq)
 	if (!(nvme_req(rq)->flags & NVME_MPATH_IO_STATS))
 		return;
 	bdev_end_io_acct(ns->head->disk->part0, req_op(rq),
-		nvme_req(rq)->start_time);
+			 blk_rq_bytes(rq) >> SECTOR_SHIFT,
+			 nvme_req(rq)->start_time);
 }
 
 void nvme_kick_requeue_lists(struct nvme_ctrl *ctrl)
@@ -402,14 +402,14 @@ static void nvme_ns_head_submit_bio(struct bio *bio)
 	srcu_read_unlock(&head->srcu, srcu_idx);
 }
 
-static int nvme_ns_head_open(struct block_device *bdev, fmode_t mode)
+static int nvme_ns_head_open(struct gendisk *disk, blk_mode_t mode)
 {
-	if (!nvme_tryget_ns_head(bdev->bd_disk->private_data))
+	if (!nvme_tryget_ns_head(disk->private_data))
 		return -ENXIO;
 	return 0;
 }
 
-static void nvme_ns_head_release(struct gendisk *disk, fmode_t mode)
+static void nvme_ns_head_release(struct gendisk *disk)
 {
 	nvme_put_ns_head(disk->private_data);
 }
@@ -884,7 +884,6 @@ void nvme_mpath_remove_disk(struct nvme_ns_head *head)
 {
 	if (!head->disk)
 		return;
-	blk_mark_disk_dead(head->disk);
 	/* make sure all pending bios are cleaned up */
 	kblockd_schedule_work(&head->requeue_work);
 	flush_work(&head->requeue_work);

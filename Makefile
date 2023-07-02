@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 VERSION = 6
-PATCHLEVEL = 2
+PATCHLEVEL = 4
 SUBLEVEL = 0
 EXTRAVERSION =
 NAME = Hurr durr I'ma ninja sloth
@@ -38,6 +38,10 @@ __all:
 # descending is started. They are now explicitly listed as the
 # prepare rule.
 
+this-makefile := $(lastword $(MAKEFILE_LIST))
+export abs_srctree := $(realpath $(dir $(this-makefile)))
+export abs_objtree := $(CURDIR)
+
 ifneq ($(sub_make_done),1)
 
 # Do not use make's built-in rules and variables
@@ -56,26 +60,21 @@ unexport GREP_OPTIONS
 # Beautify output
 # ---------------------------------------------------------------------------
 #
-# Normally, we echo the whole command before executing it. By making
-# that echo $($(quiet)$(cmd)), we now have the possibility to set
-# $(quiet) to choose other forms of output instead, e.g.
+# Most of build commands in Kbuild start with "cmd_". You can optionally define
+# "quiet_cmd_*". If defined, the short log is printed. Otherwise, no log from
+# that command is printed by default.
 #
-#         quiet_cmd_cc_o_c = Compiling $(RELDIR)/$@
-#         cmd_cc_o_c       = $(CC) $(c_flags) -c -o $@ $<
-#
-# If $(quiet) is empty, the whole command will be printed.
-# If it is set to "quiet_", only the short version will be printed.
-# If it is set to "silent_", nothing will be printed at all, since
-# the variable $(silent_cmd_cc_o_c) doesn't exist.
+# e.g.)
+#    quiet_cmd_depmod = DEPMOD  $(MODLIB)
+#          cmd_depmod = $(srctree)/scripts/depmod.sh $(DEPMOD) $(KERNELRELEASE)
 #
 # A simple variant is to prefix commands with $(Q) - that's useful
 # for commands that shall be hidden in non-verbose mode.
 #
-#	$(Q)ln $@ :<
+#    $(Q)$(MAKE) $(build)=scripts/basic
 #
-# If KBUILD_VERBOSE equals 0 then the above command will be hidden.
-# If KBUILD_VERBOSE equals 1 then the above command is displayed.
-# If KBUILD_VERBOSE equals 2 then give the reason why each target is rebuilt.
+# If KBUILD_VERBOSE contains 1, the whole command is echoed.
+# If KBUILD_VERBOSE contains 2, the reason for rebuilding is printed.
 #
 # To put more focus on warnings, be less verbose as default
 # Use 'make V=1' to see the full commands
@@ -83,16 +82,13 @@ unexport GREP_OPTIONS
 ifeq ("$(origin V)", "command line")
   KBUILD_VERBOSE = $(V)
 endif
-ifndef KBUILD_VERBOSE
-  KBUILD_VERBOSE = 0
-endif
 
-ifeq ($(KBUILD_VERBOSE),1)
+quiet = quiet_
+Q = @
+
+ifneq ($(findstring 1, $(KBUILD_VERBOSE)),)
   quiet =
   Q =
-else
-  quiet=quiet_
-  Q = @
 endif
 
 # If the user is running make -s (silent mode), suppress echoing of
@@ -100,14 +96,14 @@ endif
 # make-4.0 (and later) keep single letter options in the 1st word of MAKEFLAGS.
 
 ifeq ($(filter 3.%,$(MAKE_VERSION)),)
-silence:=$(findstring s,$(firstword -$(MAKEFLAGS)))
+short-opts := $(firstword -$(MAKEFLAGS))
 else
-silence:=$(findstring s,$(filter-out --%,$(MAKEFLAGS)))
+short-opts := $(filter-out --%,$(MAKEFLAGS))
 endif
 
-ifeq ($(silence),s)
+ifneq ($(findstring s,$(short-opts)),)
 quiet=silent_
-KBUILD_VERBOSE = 0
+override KBUILD_VERBOSE :=
 endif
 
 export quiet Q KBUILD_VERBOSE
@@ -193,30 +189,10 @@ $(if $(abs_objtree),, \
 
 # $(realpath ...) resolves symlinks
 abs_objtree := $(realpath $(abs_objtree))
-else
-abs_objtree := $(CURDIR)
 endif # ifneq ($(KBUILD_OUTPUT),)
-
-ifeq ($(abs_objtree),$(CURDIR))
-# Suppress "Entering directory ..." unless we are changing the work directory.
-MAKEFLAGS += --no-print-directory
-else
-need-sub-make := 1
-endif
-
-this-makefile := $(lastword $(MAKEFILE_LIST))
-abs_srctree := $(realpath $(dir $(this-makefile)))
 
 ifneq ($(words $(subst :, ,$(abs_srctree))), 1)
 $(error source directory cannot contain spaces or colons)
-endif
-
-ifneq ($(abs_srctree),$(abs_objtree))
-# Look for make include files relative to root of kernel src
-#
-# --included-dir is added for backward compatibility, but you should not rely on
-# it. Please add $(srctree)/ prefix to include Makefiles in the source tree.
-MAKEFLAGS += --include-dir=$(abs_srctree)
 endif
 
 ifneq ($(filter 3.%,$(MAKE_VERSION)),)
@@ -227,8 +203,24 @@ need-sub-make := 1
 $(this-makefile): ;
 endif
 
-export abs_srctree abs_objtree
 export sub_make_done := 1
+
+endif # sub_make_done
+
+ifeq ($(abs_objtree),$(CURDIR))
+# Suppress "Entering directory ..." if we are at the final work directory.
+no-print-directory := --no-print-directory
+else
+# Recursion to show "Entering directory ..."
+need-sub-make := 1
+endif
+
+ifeq ($(filter --no-print-directory, $(MAKEFLAGS)),)
+# If --no-print-directory is unset, recurse once again to set it.
+# You may end up recursing into __sub-make twice. This is needed due to the
+# behavior change in GNU Make 4.4.1.
+need-sub-make := 1
+endif
 
 ifeq ($(need-sub-make),1)
 
@@ -239,18 +231,12 @@ $(filter-out $(this-makefile), $(MAKECMDGOALS)) __all: __sub-make
 
 # Invoke a second make in the output directory, passing relevant variables
 __sub-make:
-	$(Q)$(MAKE) -C $(abs_objtree) -f $(abs_srctree)/Makefile $(MAKECMDGOALS)
+	$(Q)$(MAKE) $(no-print-directory) -C $(abs_objtree) \
+	-f $(abs_srctree)/Makefile $(MAKECMDGOALS)
 
-endif # need-sub-make
-endif # sub_make_done
+else # need-sub-make
 
 # We process the rest of the Makefile if this is the final invocation of make
-ifeq ($(need-sub-make),)
-
-# Do not print "Entering directory ...",
-# but we want to display it when entering to the output directory
-# so that IDEs/editors are able to understand relative filenames.
-MAKEFLAGS += --no-print-directory
 
 ifeq ($(abs_srctree),$(abs_objtree))
         # building in the source tree
@@ -577,7 +563,7 @@ KBUILD_CFLAGS   := -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs \
 		   -std=gnu11
 KBUILD_CPPFLAGS := -D__KERNEL__
 KBUILD_RUSTFLAGS := $(rust_common_flags) \
-		    --target=$(objtree)/rust/target.json \
+		    --target=$(objtree)/scripts/target.json \
 		    -Cpanic=abort -Cembed-bitcode=n -Clto=n \
 		    -Cforce-unwind-tables=n -Ccodegen-units=1 \
 		    -Csymbol-mangling-version=v0 \
@@ -878,7 +864,6 @@ KBUILD_RUSTFLAGS-$(CONFIG_WERROR) += -Dwarnings
 KBUILD_RUSTFLAGS += $(KBUILD_RUSTFLAGS-y)
 
 ifdef CONFIG_CC_IS_CLANG
-KBUILD_CPPFLAGS += -Qunused-arguments
 # The kernel builds with '-std=gnu11' so use of GNU extensions is acceptable.
 KBUILD_CFLAGS += -Wno-gnu
 else
@@ -921,7 +906,9 @@ ifdef CONFIG_INIT_STACK_ALL_ZERO
 KBUILD_CFLAGS	+= -ftrivial-auto-var-init=zero
 ifdef CONFIG_CC_HAS_AUTO_VAR_INIT_ZERO_ENABLER
 # https://github.com/llvm/llvm-project/issues/44842
-KBUILD_CFLAGS	+= -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+CC_AUTO_VAR_INIT_ZERO_ENABLER := -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+export CC_AUTO_VAR_INIT_ZERO_ENABLER
+KBUILD_CFLAGS	+= $(CC_AUTO_VAR_INIT_ZERO_ENABLER)
 endif
 endif
 
@@ -1041,6 +1028,12 @@ KBUILD_CFLAGS += -Wno-pointer-sign
 # globally built with -Wcast-function-type.
 KBUILD_CFLAGS += $(call cc-option, -Wcast-function-type)
 
+# To gain proper coverage for CONFIG_UBSAN_BOUNDS and CONFIG_FORTIFY_SOURCE,
+# the kernel uses only C99 flexible arrays for dynamically sized trailing
+# arrays. Enforce this for everything that may examine structure sizes and
+# perform bounds checking.
+KBUILD_CFLAGS += $(call cc-option, -fstrict-flex-arrays=3)
+
 # disable stringop warnings in gcc 8+
 KBUILD_CFLAGS += $(call cc-disable-warning, stringop-truncation)
 
@@ -1128,7 +1121,8 @@ LDFLAGS_vmlinux	+= -X
 endif
 
 ifeq ($(CONFIG_RELR),y)
-LDFLAGS_vmlinux	+= --pack-dyn-relocs=relr --use-android-relr-tags
+# ld.lld before 15 did not support -z pack-relative-relocs.
+LDFLAGS_vmlinux	+= $(call ld-option,--pack-dyn-relocs=relr,-z pack-relative-relocs)
 endif
 
 # We never want expected sections to be placed heuristically by the
@@ -1207,27 +1201,11 @@ endif
 export KBUILD_VMLINUX_LIBS
 export KBUILD_LDS          := arch/$(SRCARCH)/kernel/vmlinux.lds
 
-# Recurse until adjust_autoksyms.sh is satisfied
-PHONY += autoksyms_recursive
 ifdef CONFIG_TRIM_UNUSED_KSYMS
 # For the kernel to actually contain only the needed exported symbols,
 # we have to build modules as well to determine what those symbols are.
-# (this can be evaluated only once include/config/auto.conf has been included)
 KBUILD_MODULES := 1
-
-autoksyms_recursive: $(build-dir) modules.order
-	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/adjust_autoksyms.sh \
-	  "$(MAKE) -f $(srctree)/Makefile autoksyms_recursive"
 endif
-
-autoksyms_h := $(if $(CONFIG_TRIM_UNUSED_KSYMS), include/generated/autoksyms.h)
-
-quiet_cmd_autoksyms_h = GEN     $@
-      cmd_autoksyms_h = mkdir -p $(dir $@); \
-			$(CONFIG_SHELL) $(srctree)/scripts/gen_autoksyms.sh $@
-
-$(autoksyms_h):
-	$(call cmd,autoksyms_h)
 
 # '$(AR) mPi' needs 'T' to workaround the bug of llvm-ar <= 14
 quiet_cmd_ar_vmlinux.a = AR      $@
@@ -1237,7 +1215,7 @@ quiet_cmd_ar_vmlinux.a = AR      $@
 	$(AR) mPiT $$($(AR) t $@ | sed -n 1p) $@ $$($(AR) t $@ | grep -F -f $(srctree)/scripts/head-object-list.txt)
 
 targets += vmlinux.a
-vmlinux.a: $(KBUILD_VMLINUX_OBJS) scripts/head-object-list.txt autoksyms_recursive FORCE
+vmlinux.a: $(KBUILD_VMLINUX_OBJS) scripts/head-object-list.txt FORCE
 	$(call if_changed,ar_vmlinux.a)
 
 PHONY += vmlinux_o
@@ -1267,8 +1245,11 @@ vmlinux: vmlinux.o $(KBUILD_LDS) modpost
 # make sure no implicit rule kicks in
 $(sort $(KBUILD_LDS) $(KBUILD_VMLINUX_OBJS) $(KBUILD_VMLINUX_LIBS)): . ;
 
-filechk_kernel.release = \
-	echo "$(KERNELVERSION)$$($(CONFIG_SHELL) $(srctree)/scripts/setlocalversion $(srctree))"
+ifeq ($(origin KERNELRELEASE),file)
+filechk_kernel.release = $(srctree)/scripts/setlocalversion $(srctree)
+else
+filechk_kernel.release = echo $(KERNELRELEASE)
+endif
 
 # Store (new) KERNELRELEASE string in include/config/kernel.release
 include/config/kernel.release: FORCE
@@ -1290,7 +1271,7 @@ scripts: scripts_basic scripts_dtc
 PHONY += prepare archprepare
 
 archprepare: outputmakefile archheaders archscripts scripts include/config/kernel.release \
-	asm-generic $(version_h) $(autoksyms_h) include/generated/utsrelease.h \
+	asm-generic $(version_h) include/generated/utsrelease.h \
 	include/generated/compile.h include/generated/autoconf.h remove-stale-files
 
 prepare0: archprepare
@@ -1493,7 +1474,10 @@ dtbs_prepare: include/config/kernel.release scripts_dtc
 
 ifneq ($(filter dtbs_check, $(MAKECMDGOALS)),)
 export CHECK_DTBS=y
-dtbs: dt_binding_check
+endif
+
+ifneq ($(CHECK_DTBS),)
+dtbs_prepare: dt_binding_check
 endif
 
 dtbs_check: dtbs
@@ -1542,7 +1526,7 @@ endif
 # Build modules
 #
 
-# *.ko are usually independent of vmlinux, but CONFIG_DEBUG_INFOBTF_MODULES
+# *.ko are usually independent of vmlinux, but CONFIG_DEBUG_INFO_BTF_MODULES
 # is an exception.
 ifdef CONFIG_DEBUG_INFO_BTF_MODULES
 KBUILD_BUILTIN := 1
@@ -1569,6 +1553,8 @@ modules_sign_only := y
 endif
 endif
 
+endif # CONFIG_MODULES
+
 modinst_pre :=
 ifneq ($(filter modules_install,$(MAKECMDGOALS)),)
 modinst_pre := __modinst_pre
@@ -1579,17 +1565,17 @@ PHONY += __modinst_pre
 __modinst_pre:
 	@rm -rf $(MODLIB)/kernel
 	@rm -f $(MODLIB)/source
-	@mkdir -p $(MODLIB)/kernel
+	@mkdir -p $(MODLIB)
+ifdef CONFIG_MODULES
 	@ln -s $(abspath $(srctree)) $(MODLIB)/source
 	@if [ ! $(objtree) -ef  $(MODLIB)/build ]; then \
 		rm -f $(MODLIB)/build ; \
 		ln -s $(CURDIR) $(MODLIB)/build ; \
 	fi
 	@sed 's:^\(.*\)\.o$$:kernel/\1.ko:' modules.order > $(MODLIB)/modules.order
+endif
 	@cp -f modules.builtin $(MODLIB)/
 	@cp -f $(objtree)/modules.builtin.modinfo $(MODLIB)/
-
-endif # CONFIG_MODULES
 
 ###
 # Cleaning is done on three levels.
@@ -1602,7 +1588,7 @@ endif # CONFIG_MODULES
 CLEAN_FILES += include/ksym vmlinux.symvers modules-only.symvers \
 	       modules.builtin modules.builtin.modinfo modules.nsdeps \
 	       compile_commands.json .thinlto-cache rust/test rust/doc \
-	       .vmlinux.objs .vmlinux.export.c
+	       rust-project.json .vmlinux.objs .vmlinux.export.c
 
 # Directories & files removed with 'make mrproper'
 MRPROPER_FILES += include/config include/generated          \
@@ -1613,8 +1599,8 @@ MRPROPER_FILES += include/config include/generated          \
 		  certs/signing_key.pem \
 		  certs/x509.genkey \
 		  vmlinux-gdb.py \
-		  *.spec \
-		  rust/target.json rust/libmacros.so
+		  *.spec rpmbuild \
+		  rust/libmacros.so
 
 # clean - Delete most, but leave enough to build external modules
 #
@@ -1779,8 +1765,9 @@ help:
 		printf "  %-16s - Show all of the above\\n" help-boards; \
 		echo '')
 
-	@echo  '  make V=0|1 [targets] 0 => quiet build (default), 1 => verbose build'
-	@echo  '  make V=2   [targets] 2 => give reason for rebuild of target'
+	@echo  '  make V=n   [targets] 1: verbose build'
+	@echo  '                       2: give reason for rebuild of target'
+	@echo  '                       V=1 and V=2 can be combined with V=12'
 	@echo  '  make O=dir [targets] Locate all output files in "dir", including .config'
 	@echo  '  make C=1   [targets] Check re-compiled c source with $$CHECK'
 	@echo  '                       (sparse by default)'
@@ -1792,6 +1779,10 @@ help:
 	@echo  '		3: more obscure warnings, can most likely be ignored'
 	@echo  '		e: warnings are being treated as errors'
 	@echo  '		Multiple levels can be combined with W=12 or W=123'
+	@$(if $(dtstree), \
+		echo '  make CHECK_DTBS=1 [targets] Check all generated dtb files against schema'; \
+		echo '         This can be applied both to "dtbs" and to individual "foo.dtb" targets' ; \
+		)
 	@echo  ''
 	@echo  'Execute "make" or "make all" to build all targets marked with [*] '
 	@echo  'For further info see the ./README file'
@@ -1868,6 +1859,12 @@ rust-analyzer:
 # Misc
 # ---------------------------------------------------------------------------
 
+PHONY += misc-check
+misc-check:
+	$(Q)$(srctree)/scripts/misc-check
+
+all: misc-check
+
 PHONY += scripts_gdb
 scripts_gdb: prepare0
 	$(Q)$(MAKE) $(build)=scripts/gdb
@@ -1878,6 +1875,8 @@ all: scripts_gdb
 endif
 
 else # KBUILD_EXTMOD
+
+filechk_kernel.release = echo $(KERNELRELEASE)
 
 ###
 # External module support.
@@ -1919,6 +1918,13 @@ help:
 	@echo  '  clean           - remove generated files in module directory only'
 	@echo  ''
 
+__external_modules_error:
+	@echo >&2 '***'
+	@echo >&2 '*** The present kernel disabled CONFIG_MODULES.'
+	@echo >&2 '*** You cannot build or install external modules.'
+	@echo >&2 '***'
+	@false
+
 endif # KBUILD_EXTMOD
 
 # ---------------------------------------------------------------------------
@@ -1955,13 +1961,10 @@ else # CONFIG_MODULES
 # Modules not configured
 # ---------------------------------------------------------------------------
 
-modules modules_install:
-	@echo >&2 '***'
-	@echo >&2 '*** The present kernel configuration has modules disabled.'
-	@echo >&2 '*** To use the module feature, please run "make menuconfig" etc.'
-	@echo >&2 '*** to enable CONFIG_MODULES.'
-	@echo >&2 '***'
-	@exit 1
+PHONY += __external_modules_error
+
+modules modules_install: __external_modules_error
+	@:
 
 KBUILD_MODULES :=
 
@@ -2034,16 +2037,17 @@ clean: $(clean-dirs)
 		-o -name '*.dtb.S' -o -name '*.dtbo.S' \
 		-o -name '*.dt.yaml' \
 		-o -name '*.dwo' -o -name '*.lst' \
-		-o -name '*.su' -o -name '*.mod' -o -name '*.usyms' \
+		-o -name '*.su' -o -name '*.mod' \
 		-o -name '.*.d' -o -name '.*.tmp' -o -name '*.mod.c' \
 		-o -name '*.lex.c' -o -name '*.tab.[ch]' \
 		-o -name '*.asn1.[ch]' \
 		-o -name '*.symtypes' -o -name 'modules.order' \
-		-o -name '.tmp_*' \
 		-o -name '*.c.[012]*.*' \
 		-o -name '*.ll' \
 		-o -name '*.gcno' \
-		-o -name '*.*.symversions' \) -type f -print | xargs rm -f
+		-o -name '*.*.symversions' \) -type f -print \
+		-o -name '.tmp_*' -print \
+		| xargs rm -rf
 
 # Generate tags for editors
 # ---------------------------------------------------------------------------
@@ -2125,7 +2129,7 @@ checkstack:
 	$(PERL) $(srctree)/scripts/checkstack.pl $(CHECKSTACK_ARCH)
 
 kernelrelease:
-	@echo "$(KERNELVERSION)$$($(CONFIG_SHELL) $(srctree)/scripts/setlocalversion $(srctree))"
+	@$(filechk_kernel.release)
 
 kernelversion:
 	@echo $(KERNELVERSION)

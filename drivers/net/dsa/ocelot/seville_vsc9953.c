@@ -893,8 +893,8 @@ static int vsc9953_mdio_bus_alloc(struct ocelot *ocelot)
 
 	rc = mscc_miim_setup(dev, &bus, "VSC9953 internal MDIO bus",
 			     ocelot->targets[GCB],
-			     ocelot->map[GCB][GCB_MIIM_MII_STATUS & REG_MASK]);
-
+			     ocelot->map[GCB][GCB_MIIM_MII_STATUS & REG_MASK],
+			     true);
 	if (rc) {
 		dev_err(dev, "failed to setup MDIO bus\n");
 		return rc;
@@ -912,7 +912,6 @@ static int vsc9953_mdio_bus_alloc(struct ocelot *ocelot)
 	for (port = 0; port < felix->info->num_ports; port++) {
 		struct ocelot_port *ocelot_port = ocelot->ports[port];
 		struct phylink_pcs *phylink_pcs;
-		struct mdio_device *mdio_device;
 		int addr = port + 4;
 
 		if (dsa_is_unused_port(felix->ds, port))
@@ -921,15 +920,9 @@ static int vsc9953_mdio_bus_alloc(struct ocelot *ocelot)
 		if (ocelot_port->phy_mode == PHY_INTERFACE_MODE_INTERNAL)
 			continue;
 
-		mdio_device = mdio_device_create(felix->imdio, addr);
-		if (IS_ERR(mdio_device))
+		phylink_pcs = lynx_pcs_create_mdiodev(felix->imdio, addr);
+		if (IS_ERR(phylink_pcs))
 			continue;
-
-		phylink_pcs = lynx_pcs_create(mdio_device);
-		if (!phylink_pcs) {
-			mdio_device_free(mdio_device);
-			continue;
-		}
 
 		felix->pcs[port] = phylink_pcs;
 
@@ -946,14 +939,9 @@ static void vsc9953_mdio_bus_free(struct ocelot *ocelot)
 
 	for (port = 0; port < ocelot->num_phys_ports; port++) {
 		struct phylink_pcs *phylink_pcs = felix->pcs[port];
-		struct mdio_device *mdio_device;
 
-		if (!phylink_pcs)
-			continue;
-
-		mdio_device = lynx_get_mdio_device(phylink_pcs);
-		mdio_device_free(mdio_device);
-		lynx_pcs_destroy(phylink_pcs);
+		if (phylink_pcs)
+			lynx_pcs_destroy(phylink_pcs);
 	}
 
 	/* mdiobus_unregister and mdiobus_free handled by devres */
@@ -971,6 +959,7 @@ static const struct felix_info seville_info_vsc9953 = {
 	.vcap_pol_max		= VSC9953_VCAP_POLICER_MAX,
 	.vcap_pol_base2		= VSC9953_VCAP_POLICER_BASE2,
 	.vcap_pol_max2		= VSC9953_VCAP_POLICER_MAX2,
+	.quirks			= FELIX_MAC_QUIRKS,
 	.num_mact_rows		= 2048,
 	.num_ports		= VSC9953_NUM_PORTS,
 	.num_tx_queues		= OCELOT_NUM_TC,
@@ -1078,7 +1067,7 @@ static struct platform_driver seville_vsc9953_driver = {
 	.shutdown	= seville_shutdown,
 	.driver = {
 		.name		= "mscc_seville",
-		.of_match_table	= of_match_ptr(seville_of_match),
+		.of_match_table	= seville_of_match,
 	},
 };
 module_platform_driver(seville_vsc9953_driver);

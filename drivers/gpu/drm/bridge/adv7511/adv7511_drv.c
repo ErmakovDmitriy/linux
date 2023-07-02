@@ -1185,8 +1185,9 @@ static int adv7511_parse_dt(struct device_node *np,
 	return 0;
 }
 
-static int adv7511_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
+static int adv7511_probe(struct i2c_client *i2c)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(i2c);
 	struct adv7511_link_config link_config;
 	struct adv7511 *adv7511;
 	struct device *dev = &i2c->dev;

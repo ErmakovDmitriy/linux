@@ -147,11 +147,9 @@ static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
 	 * exit regardless, as the old entry assembly did.
 	 */
 	if (!has_syscall_work(flags) && !IS_ENABLED(CONFIG_DEBUG_RSEQ)) {
-		local_daif_mask();
 		flags = read_thread_flags();
 		if (!has_syscall_work(flags) && !(flags & _TIF_SINGLESTEP))
 			return;
-		local_daif_restore(DAIF_PROCCTX);
 	}
 
 trace_exit:
@@ -173,12 +171,8 @@ static inline void fp_user_discard(void)
 	 * register state to track, if this changes the KVM code will
 	 * need updating.
 	 */
-	if (system_supports_sme() && test_thread_flag(TIF_SME)) {
-		u64 svcr = read_sysreg_s(SYS_SVCR);
-
-		if (svcr & SVCR_SM_MASK)
-			sme_smstop_sm();
-	}
+	if (system_supports_sme())
+		sme_smstop_sm();
 
 	if (!system_supports_sve())
 		return;

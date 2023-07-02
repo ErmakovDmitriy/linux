@@ -60,7 +60,6 @@
 #include "dcn31/dcn31_hpo_dp_stream_encoder.h"
 #include "dcn31/dcn31_hpo_dp_link_encoder.h"
 #include "dcn32/dcn32_hpo_dp_link_encoder.h"
-#include "dc_link_dp.h"
 #include "dcn31/dcn31_apg.h"
 #include "dcn31/dcn31_dio_link_encoder.h"
 #include "dcn32/dcn32_dio_link_encoder.h"
@@ -73,7 +72,7 @@
 #include "dml/display_mode_vba.h"
 #include "dcn32/dcn32_dccg.h"
 #include "dcn10/dcn10_resource.h"
-#include "dc_link_ddc.h"
+#include "link.h"
 #include "dcn31/dcn31_panel_cntl.h"
 
 #include "dcn30/dcn30_dwb.h"
@@ -656,8 +655,6 @@ static const struct resource_caps res_cap_dcn321 = {
 
 static const struct dc_plane_cap plane_cap = {
 	.type = DC_PLANE_TYPE_DCN_UNIVERSAL,
-	.blends_with_above = true,
-	.blends_with_below = true,
 	.per_pixel_alpha = true,
 
 	.pixel_format_support = {
@@ -724,28 +721,16 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.allow_sw_cursor_fallback = false, // Linux can't do SW cursor "fallback"
 	.alloc_extra_way_for_cursor = true,
 	.min_prefetch_in_strobe_ns = 60000, // 60us
+	.disable_unbounded_requesting = false,
+	.override_dispclk_programming = true,
+	.disable_fpo_optimizations = false,
+	.fpo_vactive_margin_us = 2000, // 2000us
+	.disable_fpo_vactive = false,
+	.disable_boot_optimizations = false,
+	.disable_subvp_high_refresh = false,
+	.fpo_vactive_min_active_margin_us = 200,
+	.fpo_vactive_max_blank_us = 1000,
 };
-
-static const struct dc_debug_options debug_defaults_diags = {
-	.disable_dmcu = true,
-	.force_abm_enable = false,
-	.timing_trace = true,
-	.clock_trace = true,
-	.disable_dpp_power_gate = true,
-	.disable_hubp_power_gate = true,
-	.disable_dsc_power_gate = true,
-	.disable_clock_gate = true,
-	.disable_pplib_clock_request = true,
-	.disable_pplib_wm_range = true,
-	.disable_stutter = false,
-	.scl_reset_length10 = true,
-	.dwb_fi_phase = -1, // -1 = disable
-	.dmub_command_table = true,
-	.enable_tri_buf = true,
-	.use_max_lb = true,
-	.force_disable_subvp = true,
-};
-
 
 static struct dce_aux *dcn321_aux_engine_create(
 	struct dc_context *ctx,
@@ -1337,15 +1322,6 @@ static const struct resource_create_funcs res_create_funcs = {
 	.create_hwseq = dcn321_hwseq_create,
 };
 
-static const struct resource_create_funcs res_create_maximus_funcs = {
-	.read_dce_straps = NULL,
-	.create_audio = NULL,
-	.create_stream_encoder = NULL,
-	.create_hpo_dp_stream_encoder = dcn321_hpo_dp_stream_encoder_create,
-	.create_hpo_dp_link_encoder = dcn321_hpo_dp_link_encoder_create,
-	.create_hwseq = dcn321_hwseq_create,
-};
-
 static void dcn321_resource_destruct(struct dcn321_resource_pool *pool)
 {
 	unsigned int i;
@@ -1491,8 +1467,11 @@ static void dcn321_resource_destruct(struct dcn321_resource_pool *pool)
 	if (pool->base.dccg != NULL)
 		dcn_dccg_destroy(&pool->base.dccg);
 
-	if (pool->base.oem_device != NULL)
-		dal_ddc_service_destroy(&pool->base.oem_device);
+	if (pool->base.oem_device != NULL) {
+		struct dc *dc = pool->base.oem_device->ctx->dc;
+
+		dc->link_srv->destroy_ddc_service(&pool->base.oem_device);
+	}
 }
 
 
@@ -1626,6 +1605,14 @@ static struct resource_funcs dcn321_res_pool_funcs = {
 	.restore_mall_state = dcn32_restore_mall_state,
 };
 
+static uint32_t read_pipe_fuses(struct dc_context *ctx)
+{
+	uint32_t value = REG_READ(CC_DC_PIPE_DIS);
+	/* DCN321 support max 4 pipes */
+	value = value & 0xf;
+	return value;
+}
+
 
 static bool dcn321_resource_construct(
 	uint8_t num_virtual_links,
@@ -1668,7 +1655,7 @@ static bool dcn321_resource_construct(
 	pool->base.res_cap = &res_cap_dcn321;
 	/* max number of pipes for ASIC before checking for pipe fuses */
 	num_pipes  = pool->base.res_cap->num_timing_generator;
-	pipe_fuses = REG_READ(CC_DC_PIPE_DIS);
+	pipe_fuses = read_pipe_fuses(ctx);
 
 	for (i = 0; i < pool->base.res_cap->num_timing_generator; i++)
 		if (pipe_fuses & 1 << i)
@@ -1702,12 +1689,18 @@ static bool dcn321_resource_construct(
 	dc->caps.max_cursor_size = 64;
 	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.dmdata_alloc_size = 2048;
-	dc->caps.mall_size_per_mem_channel = 0;
+	dc->caps.mall_size_per_mem_channel = 4;
 	dc->caps.mall_size_total = 0;
 	dc->caps.cursor_cache_size = dc->caps.max_cursor_size * dc->caps.max_cursor_size * 8;
 	dc->caps.cache_line_size = 64;
 	dc->caps.cache_num_ways = 16;
-	dc->caps.max_cab_allocation_bytes = 33554432; // 32MB = 1024 * 1024 * 32
+
+	/* Calculate the available MALL space */
+	dc->caps.max_cab_allocation_bytes = dcn32_calc_num_avail_chans_for_mall(
+		dc, dc->ctx->dc_bios->vram_info.num_chans) *
+		dc->caps.mall_size_per_mem_channel * 1024 * 1024;
+	dc->caps.mall_size_total = dc->caps.max_cab_allocation_bytes;
+
 	dc->caps.subvp_fw_processing_delay_us = 15;
 	dc->caps.subvp_drr_max_vblank_margin_us = 40;
 	dc->caps.subvp_prefetch_end_to_mall_start_us = 15;
@@ -1715,9 +1708,9 @@ static bool dcn321_resource_construct(
 	dc->caps.subvp_pstate_allow_width_us = 20;
 	dc->caps.subvp_vertical_int_margin_us = 30;
 	dc->caps.subvp_drr_vblank_start_margin_us = 100; // 100us margin
-	dc->caps.max_slave_planes = 1;
-	dc->caps.max_slave_yuv_planes = 1;
-	dc->caps.max_slave_rgb_planes = 1;
+	dc->caps.max_slave_planes = 2;
+	dc->caps.max_slave_yuv_planes = 2;
+	dc->caps.max_slave_rgb_planes = 2;
 	dc->caps.post_blend_color_processing = true;
 	dc->caps.force_dp_tps4_for_cp2520 = true;
 	dc->caps.dp_hpo = true;
@@ -1725,6 +1718,7 @@ static bool dcn321_resource_construct(
 	dc->caps.edp_dsc_support = true;
 	dc->caps.extended_aux_timeout_support = true;
 	dc->caps.dmcub_support = true;
+	dc->caps.max_v_total = (1 << 15) - 1;
 
 	/* Color pipeline capabilities */
 	dc->caps.color.dpp.dcn_arch = 1;
@@ -1778,10 +1772,7 @@ static bool dcn321_resource_construct(
 
 	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
-	else if (dc->ctx->dce_environment == DCE_ENV_FPGA_MAXIMUS) {
-		dc->debug = debug_defaults_diags;
-	} else
-		dc->debug = debug_defaults_diags;
+
 	// Init the vm_helper
 	if (dc->vm_helper)
 		vm_helper_init(dc->vm_helper, 16);
@@ -1837,8 +1828,7 @@ static bool dcn321_resource_construct(
 	}
 
 	/* DML */
-	if (!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment))
-		dml_init_instance(&dc->dml, &dcn3_21_soc, &dcn3_21_ip, DML_PROJECT_DCN32);
+	dml_init_instance(&dc->dml, &dcn3_21_soc, &dcn3_21_ip, DML_PROJECT_DCN32);
 
 	/* IRQ Service */
 	init_data.ctx = dc->ctx;
@@ -1970,9 +1960,8 @@ static bool dcn321_resource_construct(
 
 	/* Audio, HWSeq, Stream Encoders including HPO and virtual, MPC 3D LUTs */
 	if (!resource_construct(num_virtual_links, dc, &pool->base,
-			(!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment) ?
-			&res_create_funcs : &res_create_maximus_funcs)))
-			goto create_fail;
+			&res_create_funcs))
+		goto create_fail;
 
 	/* HW Sequencer init functions and Plane caps */
 	dcn32_hw_sequencer_init_functions(dc);
@@ -1990,7 +1979,7 @@ static bool dcn321_resource_construct(
 		ddc_init_data.id.id = dc->ctx->dc_bios->fw_info.oem_i2c_obj_id;
 		ddc_init_data.id.enum_id = 0;
 		ddc_init_data.id.type = OBJECT_TYPE_GENERIC;
-		pool->base.oem_device = dal_ddc_service_create(&ddc_init_data);
+		pool->base.oem_device = dc->link_srv->create_ddc_service(&ddc_init_data);
 	} else {
 		pool->base.oem_device = NULL;
 	}

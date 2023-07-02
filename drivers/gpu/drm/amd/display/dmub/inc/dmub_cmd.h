@@ -95,6 +95,13 @@
 /* Maximum number of SubVP streams */
 #define DMUB_MAX_SUBVP_STREAMS 2
 
+/* Define max FPO streams as 4 for now. Current implementation today
+ * only supports 1, but could be more in the future. Reduce array
+ * size to ensure the command size remains less than 64 bytes if
+ * adding new fields.
+ */
+#define DMUB_MAX_FPO_STREAMS 4
+
 /* Maximum number of streams on any ASIC. */
 #define DMUB_MAX_STREAMS 6
 
@@ -162,6 +169,7 @@ extern "C" {
 #define dmub_udelay(microseconds) udelay(microseconds)
 #endif
 
+#pragma pack(push, 1)
 /**
  * union dmub_addr - DMUB physical/virtual 64-bit address.
  */
@@ -172,6 +180,7 @@ union dmub_addr {
 	} u; /*<< Low/high bit access */
 	uint64_t quad_part; /*<< 64 bit address */
 };
+#pragma pack(pop)
 
 /**
  * Dirty rect definition.
@@ -248,7 +257,9 @@ struct dmub_feature_caps {
 	 */
 	uint8_t psr;
 	uint8_t fw_assisted_mclk_switch;
-	uint8_t reserved[6];
+	uint8_t reserved[4];
+	uint8_t subvp_psr_support;
+	uint8_t gecc_enable;
 };
 
 struct dmub_visual_confirm_color {
@@ -351,9 +362,9 @@ union dmub_fw_boot_status {
 		uint32_t optimized_init_done : 1; /**< 1 if optimized init done */
 		uint32_t restore_required : 1; /**< 1 if driver should call restore */
 		uint32_t defer_load : 1; /**< 1 if VBIOS data is deferred programmed */
-		uint32_t reserved : 1;
+		uint32_t fams_enabled : 1; /**< 1 if VBIOS data is deferred programmed */
 		uint32_t detection_required: 1; /**<  if detection need to be triggered by driver */
-
+		uint32_t hw_power_init_done: 1; /**< 1 if hw power init is completed */
 	} bits; /**< status bits */
 	uint32_t all; /**< 32-bit access to status bits */
 };
@@ -367,7 +378,9 @@ enum dmub_fw_boot_status_bit {
 	DMUB_FW_BOOT_STATUS_BIT_OPTIMIZED_INIT_DONE = (1 << 2), /**< 1 if init done */
 	DMUB_FW_BOOT_STATUS_BIT_RESTORE_REQUIRED = (1 << 3), /**< 1 if driver should call restore */
 	DMUB_FW_BOOT_STATUS_BIT_DEFERRED_LOADED = (1 << 4), /**< 1 if VBIOS data is deferred programmed */
+	DMUB_FW_BOOT_STATUS_BIT_FAMS_ENABLED = (1 << 5), /**< 1 if FAMS is enabled*/
 	DMUB_FW_BOOT_STATUS_BIT_DETECTION_REQUIRED = (1 << 6), /**< 1 if detection need to be triggered by driver*/
+	DMUB_FW_BOOT_STATUS_BIT_HW_POWER_INIT_DONE = (1 << 7), /**< 1 if hw power init is completed */
 };
 
 /* Register bit definition for SCRATCH5 */
@@ -383,6 +396,12 @@ union dmub_lvtma_status {
 enum dmub_lvtma_status_bit {
 	DMUB_LVTMA_STATUS_BIT_PSP_OK = (1 << 0),
 	DMUB_LVTMA_STATUS_BIT_EDP_ON = (1 << 1),
+};
+
+enum dmub_ips_disable_type {
+	DMUB_IPS_DISABLE_IPS1 = 1,
+	DMUB_IPS_DISABLE_IPS2 = 2,
+	DMUB_IPS_DISABLE_IPS2_Z10 = 3,
 };
 
 /**
@@ -408,8 +427,11 @@ union dmub_fw_boot_options {
 		uint32_t usb4_cm_version: 1; /**< 1 CM support */
 		uint32_t dpia_hpd_int_enable_supported: 1; /* 1 if dpia hpd int enable supported */
 		uint32_t usb4_dpia_bw_alloc_supported: 1; /* 1 if USB4 dpia BW allocation supported */
-
-		uint32_t reserved : 15; /**< reserved */
+		uint32_t disable_clk_ds: 1; /* 1 if disallow dispclk_ds and dppclk_ds*/
+		uint32_t disable_timeout_recovery : 1; /* 1 if timeout recovery should be disabled */
+		uint32_t ips_pg_disable: 1; /* 1 to disable ONO domains power gating*/
+		uint32_t ips_disable: 2; /* options to disable ips support*/
+		uint32_t reserved : 10; /**< reserved */
 	} bits; /**< boot bits */
 	uint32_t all; /**< 32-bit access to bits */
 };
@@ -457,6 +479,10 @@ enum dmub_cmd_vbios_type {
 	 * Query DP alt status on a transmitter.
 	 */
 	DMUB_CMD__VBIOS_TRANSMITTER_QUERY_DP_ALT  = 26,
+	/**
+	 * Controls domain power gating
+	 */
+	DMUB_CMD__VBIOS_DOMAIN_CONTROL = 28,
 };
 
 //==============================================================================
@@ -770,6 +796,10 @@ enum dmub_out_cmd_type {
 	 * Command type used for SET_CONFIG Reply notification
 	 */
 	DMUB_OUT_CMD__SET_CONFIG_REPLY = 3,
+	/**
+	 * Command type used for USB4 DPIA notification
+	 */
+	DMUB_OUT_CMD__DPIA_NOTIFICATION = 5,
 };
 
 /* DMUB_CMD__DPIA command sub-types. */
@@ -777,6 +807,11 @@ enum dmub_cmd_dpia_type {
 	DMUB_CMD__DPIA_DIG1_DPIA_CONTROL = 0,
 	DMUB_CMD__DPIA_SET_CONFIG_ACCESS = 1,
 	DMUB_CMD__DPIA_MST_ALLOC_SLOTS = 2,
+};
+
+/* DMUB_OUT_CMD__DPIA_NOTIFICATION command types. */
+enum dmub_cmd_dpia_notification_type {
+	DPIA_NOTIFY__BW_ALLOCATION = 0,
 };
 
 #pragma pack(push, 1)
@@ -965,16 +1000,25 @@ struct dmub_rb_cmd_mall {
 };
 
 /**
- * enum dmub_cmd_cab_type - TODO:
+ * enum dmub_cmd_cab_type - CAB command data.
  */
 enum dmub_cmd_cab_type {
+	/**
+	 * No idle optimizations (i.e. no CAB)
+	 */
 	DMUB_CMD__CAB_NO_IDLE_OPTIMIZATION = 0,
+	/**
+	 * No DCN requests for memory
+	 */
 	DMUB_CMD__CAB_NO_DCN_REQ = 1,
+	/**
+	 * Fit surfaces in CAB (i.e. CAB enable)
+	 */
 	DMUB_CMD__CAB_DCN_SS_FIT_IN_CAB = 2,
 };
 
 /**
- * struct dmub_rb_cmd_cab_for_ss - TODO:
+ * struct dmub_rb_cmd_cab - CAB command data.
  */
 struct dmub_rb_cmd_cab_for_ss {
 	struct dmub_cmd_header header;
@@ -982,6 +1026,9 @@ struct dmub_rb_cmd_cab_for_ss {
 	uint8_t debug_bits;     /* debug bits */
 };
 
+/**
+ * Enum for indicating which MCLK switch mode per pipe
+ */
 enum mclk_switch_mode {
 	NONE = 0,
 	FPO = 1,
@@ -1082,7 +1129,12 @@ enum dmub_cmd_idle_opt_type {
 	/**
 	 * DCN hardware save.
 	 */
-	DMUB_CMD__IDLE_OPT_DCN_SAVE_INIT = 1
+	DMUB_CMD__IDLE_OPT_DCN_SAVE_INIT = 1,
+
+	/**
+	 * DCN hardware notify idle.
+	 */
+	DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE = 2
 };
 
 /**
@@ -1090,6 +1142,22 @@ enum dmub_cmd_idle_opt_type {
  */
 struct dmub_rb_cmd_idle_opt_dcn_restore {
 	struct dmub_cmd_header header; /**< header */
+};
+
+/**
+ * struct dmub_dcn_notify_idle_cntl_data - Data passed to FW in a DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE command.
+ */
+struct dmub_dcn_notify_idle_cntl_data {
+	uint8_t driver_idle;
+	uint8_t pad[1];
+};
+
+/**
+ * struct dmub_rb_cmd_idle_opt_dcn_notify_idle - Data passed to FW in a DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE command.
+ */
+struct dmub_rb_cmd_idle_opt_dcn_notify_idle {
+	struct dmub_cmd_header header; /**< header */
+	struct dmub_dcn_notify_idle_cntl_data cntl_data;
 };
 
 /**
@@ -1202,6 +1270,23 @@ union dmub_cmd_dig1_transmitter_control_data {
 struct dmub_rb_cmd_dig1_transmitter_control {
 	struct dmub_cmd_header header; /**< header */
 	union dmub_cmd_dig1_transmitter_control_data transmitter_control; /**< payload */
+};
+
+/**
+ * struct dmub_rb_cmd_domain_control_data - Data for DOMAIN power control
+ */
+struct dmub_rb_cmd_domain_control_data {
+	uint8_t inst : 6; /**< DOMAIN instance to control */
+	uint8_t power_gate : 1; /**< 1=power gate, 0=power up */
+	uint8_t reserved[3]; /**< Reserved for future use */
+};
+
+/**
+ * struct dmub_rb_cmd_domain_control - Controls DOMAIN power gating
+ */
+struct dmub_rb_cmd_domain_control {
+	struct dmub_cmd_header header; /**< header */
+	struct dmub_rb_cmd_domain_control_data data; /**< payload */
 };
 
 /**
@@ -1558,6 +1643,79 @@ struct dmub_rb_cmd_dp_set_config_reply {
 };
 
 /**
+ * Definition of a DPIA notification header
+ */
+struct dpia_notification_header {
+	uint8_t instance; /**< DPIA Instance */
+	uint8_t reserved[3];
+	enum dmub_cmd_dpia_notification_type type; /**< DPIA notification type */
+};
+
+/**
+ * Definition of the common data struct of DPIA notification
+ */
+struct dpia_notification_common {
+	uint8_t cmd_buffer[DMUB_RB_CMD_SIZE - sizeof(struct dmub_cmd_header)
+								- sizeof(struct dpia_notification_header)];
+};
+
+/**
+ * Definition of a DPIA notification data
+ */
+struct dpia_bw_allocation_notify_data {
+	union {
+		struct {
+			uint16_t cm_bw_alloc_support: 1; /**< USB4 CM BW Allocation mode support */
+			uint16_t bw_request_failed: 1; /**< BW_Request_Failed */
+			uint16_t bw_request_succeeded: 1; /**< BW_Request_Succeeded */
+			uint16_t est_bw_changed: 1; /**< Estimated_BW changed */
+			uint16_t bw_alloc_cap_changed: 1; /**< BW_Allocation_Capabiity_Changed */
+			uint16_t reserved: 11; /**< Reserved */
+		} bits;
+
+		uint16_t flags;
+	};
+
+	uint8_t cm_id; /**< CM ID */
+	uint8_t group_id; /**< Group ID */
+	uint8_t granularity; /**< BW Allocation Granularity */
+	uint8_t estimated_bw; /**< Estimated_BW */
+	uint8_t allocated_bw; /**< Allocated_BW */
+	uint8_t reserved;
+};
+
+/**
+ * union dpia_notify_data_type - DPIA Notification in Outbox command
+ */
+union dpia_notification_data {
+	/**
+	 * DPIA Notification for common data struct
+	 */
+	struct dpia_notification_common common_data;
+
+	/**
+	 * DPIA Notification for DP BW Allocation support
+	 */
+	struct dpia_bw_allocation_notify_data dpia_bw_alloc;
+};
+
+/**
+ * Definition of a DPIA notification payload
+ */
+struct dpia_notification_payload {
+	struct dpia_notification_header header;
+	union dpia_notification_data data; /**< DPIA notification payload data */
+};
+
+/**
+ * Definition of a DMUB_OUT_CMD__DPIA_NOTIFICATION command.
+ */
+struct dmub_rb_cmd_dpia_notification {
+	struct dmub_cmd_header header; /**< DPIA notification header */
+	struct dpia_notification_payload payload; /**< DPIA notification payload */
+};
+
+/**
  * Data passed from driver to FW in a DMUB_CMD__QUERY_HPD_STATE command.
  */
 struct dmub_cmd_hpd_state_query_data {
@@ -1866,7 +2024,7 @@ struct dmub_cmd_psr_copy_settings_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -1886,6 +2044,14 @@ struct dmub_cmd_psr_copy_settings_data {
 	 * Explicit padding to 2 byte boundary.
 	 */
 	uint8_t pad3;
+	/**
+	 * DSC Slice height.
+	 */
+	uint16_t dsc_slice_height;
+	/**
+	 * Explicit padding to 4 byte boundary.
+	 */
+	uint16_t pad;
 };
 
 /**
@@ -1916,7 +2082,7 @@ struct dmub_cmd_psr_set_level_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -1943,7 +2109,7 @@ struct dmub_rb_cmd_psr_enable_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -1987,7 +2153,7 @@ struct dmub_cmd_psr_set_version_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -2018,7 +2184,7 @@ struct dmub_cmd_psr_force_static_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -2093,7 +2259,7 @@ struct dmub_cmd_update_dirty_rect_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -2231,7 +2397,7 @@ struct dmub_cmd_update_cursor_payload0 {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -2278,7 +2444,7 @@ struct dmub_cmd_psr_set_vtotal_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -2316,7 +2482,7 @@ struct dmub_cmd_psr_set_power_opt_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel isntance to identify which psr_state to use
+	 * Panel instance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -2971,14 +3137,15 @@ struct dmub_cmd_fw_assisted_mclk_switch_pipe_data {
 	uint8_t max_ramp_step;
 	uint8_t pipes;
 	uint8_t min_refresh_in_hz;
-	uint8_t padding[1];
+	uint8_t pipe_count;
+	uint8_t pipe_index[4];
 };
 
 struct dmub_cmd_fw_assisted_mclk_switch_config {
 	uint8_t fams_enabled;
 	uint8_t visual_confirm_enabled;
-	uint8_t padding[2];
-	struct dmub_cmd_fw_assisted_mclk_switch_pipe_data pipe_data[DMUB_MAX_STREAMS];
+	uint16_t vactive_stretch_margin_us; // Extra vblank stretch required when doing FPO + Vactive
+	struct dmub_cmd_fw_assisted_mclk_switch_pipe_data pipe_data[DMUB_MAX_FPO_STREAMS];
 };
 
 struct dmub_rb_cmd_fw_assisted_mclk_switch {
@@ -3029,7 +3196,8 @@ struct dmub_rb_cmd_panel_cntl {
  */
 struct dmub_cmd_lvtma_control_data {
 	uint8_t uc_pwr_action; /**< LVTMA_ACTION */
-	uint8_t reserved_0[3]; /**< For future use */
+	uint8_t bypass_panel_control_wait;
+	uint8_t reserved_0[2]; /**< For future use */
 	uint8_t panel_inst; /**< LVTMA control instance */
 	uint8_t reserved_1[3]; /**< For future use */
 };
@@ -3232,6 +3400,10 @@ union dmub_rb_cmd {
 	 */
 	struct dmub_rb_cmd_dig1_transmitter_control dig1_transmitter_control;
 	/**
+	 * Definition of a DMUB_CMD__VBIOS_DOMAIN_CONTROL command.
+	 */
+	struct dmub_rb_cmd_domain_control domain_control;
+	/**
 	 * Definition of a DMUB_CMD__PSR_SET_VERSION command.
 	 */
 	struct dmub_rb_cmd_psr_set_version psr_set_version;
@@ -3400,6 +3572,10 @@ union dmub_rb_cmd {
 	 * Definition of a DMUB_CMD__DPIA_HPD_INT_ENABLE command.
 	 */
 	struct dmub_rb_cmd_dpia_hpd_int_enable dpia_hpd_int_enable;
+	/**
+	 * Definition of a DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE command.
+	 */
+	struct dmub_rb_cmd_idle_opt_dcn_notify_idle idle_opt_notify_idle;
 };
 
 /**
@@ -3422,6 +3598,10 @@ union dmub_rb_out_cmd {
 	 * SET_CONFIG reply command.
 	 */
 	struct dmub_rb_cmd_dp_set_config_reply set_config_reply;
+	/**
+	 * DPIA notification command.
+	 */
+	struct dmub_rb_cmd_dpia_notification dpia_notification;
 };
 #pragma pack(pop)
 

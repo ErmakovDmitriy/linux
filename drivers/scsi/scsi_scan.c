@@ -210,7 +210,7 @@ static void scsi_unlock_floptical(struct scsi_device *sdev,
 	scsi_cmd[3] = 0;
 	scsi_cmd[4] = 0x2a;     /* size */
 	scsi_cmd[5] = 0;
-	scsi_execute_req(sdev, scsi_cmd, DMA_FROM_DEVICE, result, 0x2a, NULL,
+	scsi_execute_cmd(sdev, scsi_cmd, REQ_OP_DRV_IN, result, 0x2a,
 			 SCSI_TIMEOUT, 3, NULL);
 }
 
@@ -646,8 +646,12 @@ static int scsi_probe_lun(struct scsi_device *sdev, unsigned char *inq_result,
 	unsigned char scsi_cmd[MAX_COMMAND_SIZE];
 	int first_inquiry_len, try_inquiry_len, next_inquiry_len;
 	int response_len = 0;
-	int pass, count, result;
+	int pass, count, result, resid;
 	struct scsi_sense_hdr sshdr;
+	const struct scsi_exec_args exec_args = {
+		.sshdr = &sshdr,
+		.resid = &resid,
+	};
 
 	*bflags = 0;
 
@@ -665,18 +669,16 @@ static int scsi_probe_lun(struct scsi_device *sdev, unsigned char *inq_result,
 
 	/* Each pass gets up to three chances to ignore Unit Attention */
 	for (count = 0; count < 3; ++count) {
-		int resid;
-
 		memset(scsi_cmd, 0, 6);
 		scsi_cmd[0] = INQUIRY;
 		scsi_cmd[4] = (unsigned char) try_inquiry_len;
 
 		memset(inq_result, 0, try_inquiry_len);
 
-		result = scsi_execute_req(sdev,  scsi_cmd, DMA_FROM_DEVICE,
-					  inq_result, try_inquiry_len, &sshdr,
+		result = scsi_execute_cmd(sdev,  scsi_cmd, REQ_OP_DRV_IN,
+					  inq_result, try_inquiry_len,
 					  HZ / 2 + HZ * scsi_inq_timeout, 3,
-					  &resid);
+					  &exec_args);
 
 		SCSI_LOG_SCAN_BUS(3, sdev_printk(KERN_INFO, sdev,
 				"scsi scan: INQUIRY %s with code 0x%x\n",
@@ -1055,6 +1057,9 @@ static int scsi_add_lun(struct scsi_device *sdev, unsigned char *inq_result,
 	else if (*bflags & BLIST_SKIP_VPD_PAGES)
 		sdev->skip_vpd_pages = 1;
 
+	if (*bflags & BLIST_NO_VPD_SIZE)
+		sdev->no_vpd_size = 1;
+
 	transport_configure_device(&sdev->sdev_gendev);
 
 	if (sdev->host->hostt->slave_configure) {
@@ -1081,6 +1086,8 @@ static int scsi_add_lun(struct scsi_device *sdev, unsigned char *inq_result,
 
 	if (sdev->scsi_level >= SCSI_3)
 		scsi_attach_vpd(sdev);
+
+	scsi_cdl_check(sdev);
 
 	sdev->max_queue_depth = sdev->queue_depth;
 	WARN_ON_ONCE(sdev->max_queue_depth > sdev->budget_map.depth);
@@ -1401,6 +1408,9 @@ static int scsi_report_lun_scan(struct scsi_target *starget, blist_flags_t bflag
 	struct scsi_sense_hdr sshdr;
 	struct scsi_device *sdev;
 	struct Scsi_Host *shost = dev_to_shost(&starget->dev);
+	const struct scsi_exec_args exec_args = {
+		.sshdr = &sshdr,
+	};
 	int ret = 0;
 
 	/*
@@ -1475,9 +1485,10 @@ retry:
 				"scsi scan: Sending REPORT LUNS to (try %d)\n",
 				retries));
 
-		result = scsi_execute_req(sdev, scsi_cmd, DMA_FROM_DEVICE,
-					  lun_data, length, &sshdr,
-					  SCSI_REPORT_LUNS_TIMEOUT, 3, NULL);
+		result = scsi_execute_cmd(sdev, scsi_cmd, REQ_OP_DRV_IN,
+					  lun_data, length,
+					  SCSI_REPORT_LUNS_TIMEOUT, 3,
+					  &exec_args);
 
 		SCSI_LOG_SCAN_BUS(3, sdev_printk (KERN_INFO, sdev,
 				"scsi scan: REPORT LUNS"
@@ -1615,6 +1626,7 @@ void scsi_rescan_device(struct device *dev)
 	device_lock(dev);
 
 	scsi_attach_vpd(sdev);
+	scsi_cdl_check(sdev);
 
 	if (sdev->handler && sdev->handler->rescan)
 		sdev->handler->rescan(sdev);

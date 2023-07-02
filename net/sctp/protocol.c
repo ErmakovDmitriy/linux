@@ -500,9 +500,7 @@ static void sctp_v4_get_dst(struct sctp_transport *t, union sctp_addr *saddr,
 			continue;
 
 		fl4->fl4_sport = laddr->a.v4.sin_port;
-		flowi4_update_output(fl4,
-				     asoc->base.sk->sk_bound_dev_if,
-				     RT_CONN_FLAGS_TOS(asoc->base.sk, tos),
+		flowi4_update_output(fl4, asoc->base.sk->sk_bound_dev_if,
 				     daddr->v4.sin_addr.s_addr,
 				     laddr->a.v4.sin_addr.s_addr);
 
@@ -600,8 +598,6 @@ static struct sock *sctp_v4_create_accept_sk(struct sock *sk,
 	newinet = inet_sk(newsk);
 
 	newinet->inet_daddr = asoc->peer.primary_addr.v4.sin_addr.s_addr;
-
-	sk_refcnt_debug_inc(newsk);
 
 	if (newsk->sk_prot->init(newsk)) {
 		sk_common_release(newsk);
@@ -1137,7 +1133,6 @@ static const struct proto_ops inet_seqpacket_ops = {
 	.sendmsg	   = inet_sendmsg,
 	.recvmsg	   = inet_recvmsg,
 	.mmap		   = sock_no_mmap,
-	.sendpage	   = sock_no_sendpage,
 };
 
 /* Registration with AF_INET family.  */

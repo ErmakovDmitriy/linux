@@ -56,7 +56,8 @@ void amdgpu_virt_init_setting(struct amdgpu_device *adev)
 
 	/* enable virtual display */
 	if (adev->asic_type != CHIP_ALDEBARAN &&
-	    adev->asic_type != CHIP_ARCTURUS) {
+	    adev->asic_type != CHIP_ARCTURUS &&
+	    ((adev->pdev->class >> 8) != PCI_CLASS_ACCELERATOR_PROCESSING)) {
 		if (adev->mode_info.num_crtc == 0)
 			adev->mode_info.num_crtc = 1;
 		adev->enable_virtual_display = true;
@@ -65,16 +66,19 @@ void amdgpu_virt_init_setting(struct amdgpu_device *adev)
 	adev->cg_flags = 0;
 	adev->pg_flags = 0;
 
-	/* enable mcbp for sriov asic_type before soc21 */
-	amdgpu_mcbp = (adev->asic_type < CHIP_IP_DISCOVERY) ? 1 : 0;
+	/* enable mcbp for sriov */
+	amdgpu_mcbp = 1;
 
+	/* Reduce kcq number to 2 to reduce latency */
+	if (amdgpu_num_kcq == -1)
+		amdgpu_num_kcq = 2;
 }
 
 void amdgpu_virt_kiq_reg_write_reg_wait(struct amdgpu_device *adev,
 					uint32_t reg0, uint32_t reg1,
 					uint32_t ref, uint32_t mask)
 {
-	struct amdgpu_kiq *kiq = &adev->gfx.kiq;
+	struct amdgpu_kiq *kiq = &adev->gfx.kiq[0];
 	struct amdgpu_ring *ring = &kiq->ring;
 	signed long r, cnt = 0;
 	unsigned long flags;
@@ -232,7 +236,8 @@ int amdgpu_virt_alloc_mm_table(struct amdgpu_device *adev)
 		return 0;
 
 	r = amdgpu_bo_create_kernel(adev, PAGE_SIZE, PAGE_SIZE,
-				    AMDGPU_GEM_DOMAIN_VRAM,
+				    AMDGPU_GEM_DOMAIN_VRAM |
+				    AMDGPU_GEM_DOMAIN_GTT,
 				    &adev->virt.mm_table.bo,
 				    &adev->virt.mm_table.gpu_addr,
 				    (void *)&adev->virt.mm_table.cpu_addr);
@@ -556,7 +561,6 @@ static void amdgpu_virt_populate_vf2pf_ucode_info(struct amdgpu_device *adev)
 	POPULATE_UCODE_INFO(vf2pf_info, AMD_SRIOV_UCODE_ID_RLC_SRLS, adev->gfx.rlc_srls_fw_version);
 	POPULATE_UCODE_INFO(vf2pf_info, AMD_SRIOV_UCODE_ID_MEC,      adev->gfx.mec_fw_version);
 	POPULATE_UCODE_INFO(vf2pf_info, AMD_SRIOV_UCODE_ID_MEC2,     adev->gfx.mec2_fw_version);
-	POPULATE_UCODE_INFO(vf2pf_info, AMD_SRIOV_UCODE_ID_IMU,      adev->gfx.imu_fw_version);
 	POPULATE_UCODE_INFO(vf2pf_info, AMD_SRIOV_UCODE_ID_SOS,      adev->psp.sos.fw_version);
 	POPULATE_UCODE_INFO(vf2pf_info, AMD_SRIOV_UCODE_ID_ASD,
 			    adev->psp.asd_context.bin_desc.fw_version);
@@ -982,11 +986,13 @@ static u32 amdgpu_virt_rlcg_reg_rw(struct amdgpu_device *adev, u32 offset, u32 v
 	if (offset == reg_access_ctrl->grbm_cntl) {
 		/* if the target reg offset is grbm_cntl, write to scratch_reg2 */
 		writel(v, scratch_reg2);
-		writel(v, ((void __iomem *)adev->rmmio) + (offset * 4));
+		if (flag == AMDGPU_RLCG_GC_WRITE_LEGACY)
+			writel(v, ((void __iomem *)adev->rmmio) + (offset * 4));
 	} else if (offset == reg_access_ctrl->grbm_idx) {
 		/* if the target reg offset is grbm_idx, write to scratch_reg3 */
 		writel(v, scratch_reg3);
-		writel(v, ((void __iomem *)adev->rmmio) + (offset * 4));
+		if (flag == AMDGPU_RLCG_GC_WRITE_LEGACY)
+			writel(v, ((void __iomem *)adev->rmmio) + (offset * 4));
 	} else {
 		/*
 		 * SCRATCH_REG0 	= read/write value

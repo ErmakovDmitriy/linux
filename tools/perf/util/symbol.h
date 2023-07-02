@@ -9,6 +9,7 @@
 #include <linux/list.h>
 #include <linux/rbtree.h>
 #include <stdio.h>
+#include "addr_location.h"
 #include "path.h"
 #include "symbol_conf.h"
 #include "spark.h"
@@ -64,6 +65,8 @@ struct symbol {
 	u8		inlined:1;
 	/** Has symbol__annotate2 been performed. */
 	u8		annotate2:1;
+	/** Symbol is an alias of an STT_GNU_IFUNC */
+	u8		ifunc_alias:1;
 	/** Architecture specific. Unused except on PPC where it holds st_other. */
 	u8		arch_sym;
 	/** The name of length namelen associated with the symbol. */
@@ -118,22 +121,6 @@ struct ref_reloc_sym {
 	u64		unrelocated_addr;
 };
 
-struct addr_location {
-	struct thread *thread;
-	struct maps   *maps;
-	struct map    *map;
-	struct symbol *sym;
-	const char    *srcline;
-	u64	      addr;
-	char	      level;
-	u8	      filtered;
-	u8	      cpumode;
-	s32	      cpu;
-	s32	      socket;
-};
-
-void addr_location__put(struct addr_location *al);
-
 int dso__load(struct dso *dso, struct map *map);
 int dso__load_vmlinux(struct dso *dso, struct map *map,
 		      const char *vmlinux, bool vmlinux_allocated);
@@ -148,6 +135,7 @@ void dso__delete_symbol(struct dso *dso,
 			struct symbol *sym);
 
 struct symbol *dso__find_symbol(struct dso *dso, u64 addr);
+struct symbol *dso__find_symbol_nocache(struct dso *dso, u64 addr);
 struct symbol *dso__find_symbol_by_name(struct dso *dso, const char *name);
 
 struct symbol *symbol__next_by_name(struct symbol *sym);

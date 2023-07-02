@@ -129,7 +129,6 @@ SECTIONS
 		HEAD_TEXT
 		TEXT_TEXT
 		SCHED_TEXT
-		CPUIDLE_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
 		SOFTIRQENTRY_TEXT
@@ -507,6 +506,10 @@ INIT_PER_CPU(irq_stack_backing_store);
 #ifdef CONFIG_SMP
 . = ASSERT((fixed_percpu_data == 0),
            "fixed_percpu_data is not at start of per-cpu area");
+#endif
+
+#ifdef CONFIG_RETHUNK
+. = ASSERT((__x86_return_thunk & 0x3f) == 0, "__x86_return_thunk not cacheline-aligned");
 #endif
 
 #endif /* CONFIG_X86_64 */

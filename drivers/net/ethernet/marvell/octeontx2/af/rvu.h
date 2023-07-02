@@ -108,6 +108,8 @@ struct rvu_block {
 	u64  lfreset_reg;
 	unsigned char name[NAME_SIZE];
 	struct rvu *rvu;
+	u64 cpt_flt_eng_map[3];
+	u64 cpt_rcvrd_eng_map[3];
 };
 
 struct nix_mcast {
@@ -283,6 +285,22 @@ struct nix_mark_format {
 	u32 *cfg;
 };
 
+/* smq(flush) to tl1 cir/pir info */
+struct nix_smq_tree_ctx {
+	u64 cir_off;
+	u64 cir_val;
+	u64 pir_off;
+	u64 pir_val;
+};
+
+/* smq flush context */
+struct nix_smq_flush_ctx {
+	int smq;
+	u16 tl1_schq;
+	u16 tl2_schq;
+	struct nix_smq_tree_ctx smq_tree_ctx[NIX_TXSCH_LVL_CNT];
+};
+
 struct npc_pkind {
 	struct rsrc_bmap rsrc;
 	u32	*pfchan_map;
@@ -344,6 +362,7 @@ struct hw_cap {
 	bool	per_pf_mbox_regs; /* PF mbox specified in per PF registers ? */
 	bool	programmable_chans; /* Channels programmable ? */
 	bool	ipolicer;
+	bool	nix_multiple_dwrr_mtu;   /* Multiple DWRR_MTU to choose from */
 	bool	npc_hash_extract; /* Hash extract enabled ? */
 	bool	npc_exact_match_enabled; /* Exact match supported ? */
 };
@@ -459,6 +478,7 @@ struct rvu {
 	struct rvu_pfvf		*pf;
 	struct rvu_pfvf		*hwvf;
 	struct mutex		rsrc_lock; /* Serialize resource alloc/free */
+	struct mutex		alias_lock; /* Serialize bar2 alias access */
 	int			vfs; /* Number of VFs attached to RVU */
 	int			nix_blkaddr[MAX_NIX_BLKS];
 
@@ -510,6 +530,7 @@ struct rvu {
 	struct ptp		*ptp;
 
 	int			mcs_blk_cnt;
+	int			cpt_pf_num;
 
 #ifdef CONFIG_DEBUG_FS
 	struct rvu_debugfs	rvu_dbg;
@@ -524,6 +545,8 @@ struct rvu {
 	struct list_head	mcs_intrq_head;
 	/* mcs interrupt queue lock */
 	spinlock_t		mcs_intrq_lock;
+	/* CPT interrupt lock */
+	spinlock_t		cpt_intr_lock;
 };
 
 static inline void rvu_write64(struct rvu *rvu, u64 block, u64 offset, u64 val)
@@ -544,6 +567,17 @@ static inline void rvupf_write64(struct rvu *rvu, u64 offset, u64 val)
 static inline u64 rvupf_read64(struct rvu *rvu, u64 offset)
 {
 	return readq(rvu->pfreg_base + offset);
+}
+
+static inline void rvu_bar2_sel_write64(struct rvu *rvu, u64 block, u64 offset, u64 val)
+{
+	/* HW requires read back of RVU_AF_BAR2_SEL register to make sure completion of
+	 * write operation.
+	 */
+	rvu_write64(rvu, block, offset, val);
+	rvu_read64(rvu, block, offset);
+	/* Barrier to ensure read completes before accessing LF registers */
+	mb();
 }
 
 /* Silicon revisions */
@@ -785,8 +819,11 @@ int nix_aq_context_read(struct rvu *rvu, struct nix_hw *nix_hw,
 			struct nix_cn10k_aq_enq_rsp *aq_rsp,
 			u16 pcifunc, u8 ctype, u32 qidx);
 int rvu_get_nix_blkaddr(struct rvu *rvu, u16 pcifunc);
+int nix_get_dwrr_mtu_reg(struct rvu_hwinfo *hw, int smq_link_type);
 u32 convert_dwrr_mtu_to_bytes(u8 dwrr_mtu);
 u32 convert_bytes_to_dwrr_mtu(u32 bytes);
+void rvu_nix_tx_tl2_cfg(struct rvu *rvu, int blkaddr, u16 pcifunc,
+			struct nix_txsch *txsch, bool enable);
 
 /* NPC APIs */
 void rvu_npc_freemem(struct rvu *rvu);
@@ -865,10 +902,17 @@ void rvu_cpt_unregister_interrupts(struct rvu *rvu);
 int rvu_cpt_lf_teardown(struct rvu *rvu, u16 pcifunc, int blkaddr, int lf,
 			int slot);
 int rvu_cpt_ctx_flush(struct rvu *rvu, u16 pcifunc);
+int rvu_cpt_init(struct rvu *rvu);
+
+#define NDC_AF_BANK_MASK       GENMASK_ULL(7, 0)
+#define NDC_AF_BANK_LINE_MASK  GENMASK_ULL(31, 16)
 
 /* CN10K RVU */
 int rvu_set_channels_base(struct rvu *rvu);
 void rvu_program_channels(struct rvu *rvu);
+
+/* CN10K NIX */
+void rvu_nix_block_cn10k_init(struct rvu *rvu, struct nix_hw *nix_hw);
 
 /* CN10K RVU - LMT*/
 void rvu_reset_lmt_map_tbl(struct rvu *rvu, u16 pcifunc);
@@ -880,6 +924,8 @@ void rvu_dbg_exit(struct rvu *rvu);
 static inline void rvu_dbg_init(struct rvu *rvu) {}
 static inline void rvu_dbg_exit(struct rvu *rvu) {}
 #endif
+
+int rvu_ndc_fix_locked_cacheline(struct rvu *rvu, int blkaddr);
 
 /* RVU Switch */
 void rvu_switch_enable(struct rvu *rvu);
@@ -894,6 +940,7 @@ int rvu_get_hwvf(struct rvu *rvu, int pcifunc);
 /* CN10K MCS */
 int rvu_mcs_init(struct rvu *rvu);
 int rvu_mcs_flr_handler(struct rvu *rvu, u16 pcifunc);
+void rvu_mcs_ptp_cfg(struct rvu *rvu, u8 rpm_id, u8 lmac_id, bool ena);
 void rvu_mcs_exit(struct rvu *rvu);
 
 #endif /* RVU_H */

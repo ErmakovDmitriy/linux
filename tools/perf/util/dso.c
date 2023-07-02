@@ -67,6 +67,39 @@ char dso__symtab_origin(const struct dso *dso)
 	return origin[dso->symtab_type];
 }
 
+bool dso__is_object_file(const struct dso *dso)
+{
+	switch (dso->binary_type) {
+	case DSO_BINARY_TYPE__KALLSYMS:
+	case DSO_BINARY_TYPE__GUEST_KALLSYMS:
+	case DSO_BINARY_TYPE__JAVA_JIT:
+	case DSO_BINARY_TYPE__BPF_PROG_INFO:
+	case DSO_BINARY_TYPE__BPF_IMAGE:
+	case DSO_BINARY_TYPE__OOL:
+		return false;
+	case DSO_BINARY_TYPE__VMLINUX:
+	case DSO_BINARY_TYPE__GUEST_VMLINUX:
+	case DSO_BINARY_TYPE__DEBUGLINK:
+	case DSO_BINARY_TYPE__BUILD_ID_CACHE:
+	case DSO_BINARY_TYPE__BUILD_ID_CACHE_DEBUGINFO:
+	case DSO_BINARY_TYPE__FEDORA_DEBUGINFO:
+	case DSO_BINARY_TYPE__UBUNTU_DEBUGINFO:
+	case DSO_BINARY_TYPE__MIXEDUP_UBUNTU_DEBUGINFO:
+	case DSO_BINARY_TYPE__BUILDID_DEBUGINFO:
+	case DSO_BINARY_TYPE__SYSTEM_PATH_DSO:
+	case DSO_BINARY_TYPE__GUEST_KMODULE:
+	case DSO_BINARY_TYPE__GUEST_KMODULE_COMP:
+	case DSO_BINARY_TYPE__SYSTEM_PATH_KMODULE:
+	case DSO_BINARY_TYPE__SYSTEM_PATH_KMODULE_COMP:
+	case DSO_BINARY_TYPE__KCORE:
+	case DSO_BINARY_TYPE__GUEST_KCORE:
+	case DSO_BINARY_TYPE__OPENEMBEDDED_DEBUGINFO:
+	case DSO_BINARY_TYPE__NOT_FOUND:
+	default:
+		return true;
+	}
+}
+
 int dso__read_binary_type_filename(const struct dso *dso,
 				   enum dso_binary_type type,
 				   char *root_dir, char *filename, size_t size)
@@ -491,6 +524,11 @@ static int do_open(char *name)
 	return -1;
 }
 
+char *dso__filename_with_chroot(const struct dso *dso, const char *filename)
+{
+	return filename_with_chroot(nsinfo__pid(dso->nsinfo), filename);
+}
+
 static int __open_dso(struct dso *dso, struct machine *machine)
 {
 	int fd = -EINVAL;
@@ -515,7 +553,7 @@ static int __open_dso(struct dso *dso, struct machine *machine)
 		if (errno != ENOENT || dso->nsinfo == NULL)
 			goto out;
 
-		new_name = filename_with_chroot(dso->nsinfo->pid, name);
+		new_name = dso__filename_with_chroot(dso, name);
 		if (!new_name)
 			goto out;
 
@@ -1122,7 +1160,8 @@ ssize_t dso__data_read_addr(struct dso *dso, struct map *map,
 			    struct machine *machine, u64 addr,
 			    u8 *data, ssize_t size)
 {
-	u64 offset = map->map_ip(map, addr);
+	u64 offset = map__map_ip(map, addr);
+
 	return dso__data_read_offset(dso, machine, offset, data, size);
 }
 
@@ -1162,7 +1201,8 @@ ssize_t dso__data_write_cache_addr(struct dso *dso, struct map *map,
 				   struct machine *machine, u64 addr,
 				   const u8 *data, ssize_t size)
 {
-	u64 offset = map->map_ip(map, addr);
+	u64 offset = map__map_ip(map, addr);
+
 	return dso__data_write_cache_offs(dso, machine, offset, data, size);
 }
 

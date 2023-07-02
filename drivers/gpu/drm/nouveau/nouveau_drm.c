@@ -31,9 +31,7 @@
 #include <linux/dynamic_debug.h>
 
 #include <drm/drm_aperture.h>
-#include <drm/drm_crtc_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fb_helper.h>
 #include <drm/drm_fbdev_generic.h>
 #include <drm/drm_gem_ttm_helper.h>
 #include <drm/drm_ioctl.h>
@@ -139,10 +137,16 @@ nouveau_name(struct drm_device *dev)
 static inline bool
 nouveau_cli_work_ready(struct dma_fence *fence)
 {
-	if (!dma_fence_is_signaled(fence))
-		return false;
-	dma_fence_put(fence);
-	return true;
+	bool ret = true;
+
+	spin_lock_irq(fence->lock);
+	if (!dma_fence_is_signaled_locked(fence))
+		ret = false;
+	spin_unlock_irq(fence->lock);
+
+	if (ret == true)
+		dma_fence_put(fence);
+	return ret;
 }
 
 static void
@@ -1221,13 +1225,9 @@ nouveau_driver_fops = {
 
 static struct drm_driver
 driver_stub = {
-	.driver_features =
-		DRIVER_GEM | DRIVER_MODESET | DRIVER_RENDER
-#if defined(CONFIG_NOUVEAU_LEGACY_CTX_SUPPORT)
-		| DRIVER_KMS_LEGACY_CONTEXT
-#endif
-		,
-
+	.driver_features = DRIVER_GEM |
+			   DRIVER_MODESET |
+			   DRIVER_RENDER,
 	.open = nouveau_drm_open,
 	.postclose = nouveau_drm_postclose,
 	.lastclose = nouveau_vga_lastclose,

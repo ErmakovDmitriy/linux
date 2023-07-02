@@ -549,7 +549,7 @@ static void mrfld_pin_dbg_show(struct pinctrl_dev *pctldev, struct seq_file *s,
 	}
 
 	mode = (value & BUFCFG_PINMODE_MASK) >> BUFCFG_PINMODE_SHIFT;
-	if (!mode)
+	if (mode == BUFCFG_PINMODE_GPIO)
 		seq_puts(s, "GPIO ");
 	else
 		seq_printf(s, "mode %d ", mode);
@@ -576,7 +576,7 @@ static const char *mrfld_get_function_name(struct pinctrl_dev *pctldev,
 {
 	struct mrfld_pinctrl *mp = pinctrl_dev_get_drvdata(pctldev);
 
-	return mp->functions[function].name;
+	return mp->functions[function].func.name;
 }
 
 static int mrfld_get_function_groups(struct pinctrl_dev *pctldev,
@@ -586,8 +586,8 @@ static int mrfld_get_function_groups(struct pinctrl_dev *pctldev,
 {
 	struct mrfld_pinctrl *mp = pinctrl_dev_get_drvdata(pctldev);
 
-	*groups = mp->functions[function].groups;
-	*ngroups = mp->functions[function].ngroups;
+	*groups = mp->functions[function].func.groups;
+	*ngroups = mp->functions[function].func.ngroups;
 	return 0;
 }
 
@@ -710,6 +710,11 @@ static int mrfld_config_get(struct pinctrl_dev *pctldev, unsigned int pin,
 
 		break;
 
+	case PIN_CONFIG_DRIVE_PUSH_PULL:
+		if (value & BUFCFG_OD_EN)
+			return -EINVAL;
+		break;
+
 	case PIN_CONFIG_DRIVE_OPEN_DRAIN:
 		if (!(value & BUFCFG_OD_EN))
 			return -EINVAL;
@@ -791,10 +796,14 @@ static int mrfld_config_set_pin(struct mrfld_pinctrl *mp, unsigned int pin,
 
 		break;
 
+	case PIN_CONFIG_DRIVE_PUSH_PULL:
+		mask |= BUFCFG_OD_EN;
+		bits &= ~BUFCFG_OD_EN;
+		break;
+
 	case PIN_CONFIG_DRIVE_OPEN_DRAIN:
 		mask |= BUFCFG_OD_EN;
-		if (arg)
-			bits |= BUFCFG_OD_EN;
+		bits |= BUFCFG_OD_EN;
 		break;
 
 	case PIN_CONFIG_SLEW_RATE:
@@ -826,6 +835,7 @@ static int mrfld_config_set(struct pinctrl_dev *pctldev, unsigned int pin,
 		case PIN_CONFIG_BIAS_DISABLE:
 		case PIN_CONFIG_BIAS_PULL_UP:
 		case PIN_CONFIG_BIAS_PULL_DOWN:
+		case PIN_CONFIG_DRIVE_PUSH_PULL:
 		case PIN_CONFIG_DRIVE_OPEN_DRAIN:
 		case PIN_CONFIG_SLEW_RATE:
 			ret = mrfld_config_set_pin(mp, pin, configs[i]);

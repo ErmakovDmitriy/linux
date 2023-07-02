@@ -19,6 +19,8 @@
 
 #include <trace/events/block.h>
 
+extern const struct pr_ops nvme_pr_ops;
+
 extern unsigned int nvme_io_timeout;
 #define NVME_IO_TIMEOUT	(nvme_io_timeout * HZ)
 
@@ -149,6 +151,11 @@ enum nvme_quirks {
 	 * Reports garbage in the namespace identifiers (eui64, nguid, uuid).
 	 */
 	NVME_QUIRK_BOGUS_NID			= (1 << 18),
+
+	/*
+	 * No temperature thresholds for channels other than 0 (Composite).
+	 */
+	NVME_QUIRK_NO_SECONDARY_TEMP_THRESH	= (1 << 19),
 };
 
 /*
@@ -242,12 +249,13 @@ enum nvme_ctrl_flags {
 	NVME_CTRL_ADMIN_Q_STOPPED	= 1,
 	NVME_CTRL_STARTED_ONCE		= 2,
 	NVME_CTRL_STOPPED		= 3,
+	NVME_CTRL_SKIP_ID_CNS_CS	= 4,
 };
 
 struct nvme_ctrl {
 	bool comp_seen;
-	enum nvme_ctrl_state state;
 	bool identified;
+	enum nvme_ctrl_state state;
 	spinlock_t lock;
 	struct mutex scan_lock;
 	const struct nvme_ctrl_ops *ops;
@@ -279,8 +287,8 @@ struct nvme_ctrl {
 	char name[12];
 	u16 cntlid;
 
-	u32 ctrl_config;
 	u16 mtfa;
+	u32 ctrl_config;
 	u32 queue_count;
 
 	u64 cap;
@@ -323,6 +331,7 @@ struct nvme_ctrl {
 	struct delayed_work ka_work;
 	struct delayed_work failfast_work;
 	struct nvme_command ka_cmd;
+	unsigned long ka_last_check_time;
 	struct work_struct fw_act_work;
 	unsigned long events;
 
@@ -353,10 +362,10 @@ struct nvme_ctrl {
 	bool apst_enabled;
 
 	/* PCIe only: */
+	u16 hmmaxd;
 	u32 hmpre;
 	u32 hmmin;
 	u32 hmminds;
-	u16 hmmaxd;
 
 	/* Fabrics only */
 	u32 ioccsz;
@@ -836,10 +845,10 @@ void nvme_put_ns_head(struct nvme_ns_head *head);
 int nvme_cdev_add(struct cdev *cdev, struct device *cdev_device,
 		const struct file_operations *fops, struct module *owner);
 void nvme_cdev_del(struct cdev *cdev, struct device *cdev_device);
-int nvme_ioctl(struct block_device *bdev, fmode_t mode,
+int nvme_ioctl(struct block_device *bdev, blk_mode_t mode,
 		unsigned int cmd, unsigned long arg);
 long nvme_ns_chr_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
-int nvme_ns_head_ioctl(struct block_device *bdev, fmode_t mode,
+int nvme_ns_head_ioctl(struct block_device *bdev, blk_mode_t mode,
 		unsigned int cmd, unsigned long arg);
 long nvme_ns_head_chr_ioctl(struct file *file, unsigned int cmd,
 		unsigned long arg);
@@ -860,7 +869,11 @@ extern const struct attribute_group *nvme_ns_id_attr_groups[];
 extern const struct pr_ops nvme_pr_ops;
 extern const struct block_device_operations nvme_ns_head_ops;
 extern const struct attribute_group nvme_dev_attrs_group;
+extern const struct attribute_group *nvme_subsys_attrs_groups[];
+extern const struct attribute_group *nvme_dev_attr_groups[];
+extern const struct block_device_operations nvme_bdev_ops;
 
+void nvme_delete_ctrl_sync(struct nvme_ctrl *ctrl);
 struct nvme_ns *nvme_find_path(struct nvme_ns_head *head);
 #ifdef CONFIG_NVME_MULTIPATH
 static inline bool nvme_ctrl_use_ana(struct nvme_ctrl *ctrl)
@@ -1070,8 +1083,9 @@ static inline void nvme_auth_free(struct nvme_ctrl *ctrl) {};
 
 u32 nvme_command_effects(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
 			 u8 opcode);
-int nvme_execute_passthru_rq(struct request *rq, u32 *effects);
-void nvme_passthru_end(struct nvme_ctrl *ctrl, u32 effects,
+u32 nvme_passthru_start(struct nvme_ctrl *ctrl, struct nvme_ns *ns, u8 opcode);
+int nvme_execute_rq(struct request *rq, bool at_head);
+void nvme_passthru_end(struct nvme_ctrl *ctrl, struct nvme_ns *ns, u32 effects,
 		       struct nvme_command *cmd, int status);
 struct nvme_ctrl *nvme_ctrl_from_file(struct file *file);
 struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid);
@@ -1086,6 +1100,7 @@ static inline bool nvme_multi_css(struct nvme_ctrl *ctrl)
 const unsigned char *nvme_get_error_status_str(u16 status);
 const unsigned char *nvme_get_opcode_str(u8 opcode);
 const unsigned char *nvme_get_admin_opcode_str(u8 opcode);
+const unsigned char *nvme_get_fabrics_opcode_str(u8 opcode);
 #else /* CONFIG_NVME_VERBOSE_ERRORS */
 static inline const unsigned char *nvme_get_error_status_str(u16 status)
 {
@@ -1099,6 +1114,18 @@ static inline const unsigned char *nvme_get_admin_opcode_str(u8 opcode)
 {
 	return "Admin Cmd";
 }
+
+static inline const unsigned char *nvme_get_fabrics_opcode_str(u8 opcode)
+{
+	return "Fabrics Cmd";
+}
 #endif /* CONFIG_NVME_VERBOSE_ERRORS */
 
+static inline const unsigned char *nvme_opcode_str(int qid, u8 opcode, u8 fctype)
+{
+	if (opcode == nvme_fabrics_command)
+		return nvme_get_fabrics_opcode_str(fctype);
+	return qid ? nvme_get_opcode_str(opcode) :
+		nvme_get_admin_opcode_str(opcode);
+}
 #endif /* _NVME_H */

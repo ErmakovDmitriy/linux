@@ -211,8 +211,8 @@ static struct memory_tier *find_create_memory_tier(struct memory_dev_type *memty
 
 	ret = device_register(&new_memtier->dev);
 	if (ret) {
-		list_del(&memtier->list);
-		put_device(&memtier->dev);
+		list_del(&new_memtier->list);
+		put_device(&new_memtier->dev);
 		return ERR_PTR(ret);
 	}
 	memtier = new_memtier;
@@ -366,7 +366,7 @@ static void establish_demotion_targets(void)
 
 	lockdep_assert_held_once(&memory_tier_lock);
 
-	if (!node_demotion || !IS_ENABLED(CONFIG_MIGRATION))
+	if (!node_demotion)
 		return;
 
 	disable_all_demotion_targets();
@@ -451,7 +451,6 @@ static void establish_demotion_targets(void)
 }
 
 #else
-static inline void disable_all_demotion_targets(void) {}
 static inline void establish_demotion_targets(void) {}
 #endif /* CONFIG_MIGRATION */
 

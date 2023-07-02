@@ -150,9 +150,8 @@ xdr_alloc_bvec(struct xdr_buf *buf, gfp_t gfp)
 		if (!buf->bvec)
 			return -ENOMEM;
 		for (i = 0; i < n; i++) {
-			buf->bvec[i].bv_page = buf->pages[i];
-			buf->bvec[i].bv_len = PAGE_SIZE;
-			buf->bvec[i].bv_offset = 0;
+			bvec_set_page(&buf->bvec[i], buf->pages[i], PAGE_SIZE,
+				      0);
 		}
 	}
 	return 0;
@@ -863,13 +862,6 @@ static unsigned int xdr_shrink_pagelen(struct xdr_buf *buf, unsigned int len)
 	return shift;
 }
 
-void
-xdr_shift_buf(struct xdr_buf *buf, size_t len)
-{
-	xdr_shrink_bufhead(buf, buf->head->iov_len - len);
-}
-EXPORT_SYMBOL_GPL(xdr_shift_buf);
-
 /**
  * xdr_stream_pos - Return the current offset from the start of the xdr_stream
  * @xdr: pointer to struct xdr_stream
@@ -1078,22 +1070,22 @@ __be32 * xdr_reserve_space(struct xdr_stream *xdr, size_t nbytes)
 }
 EXPORT_SYMBOL_GPL(xdr_reserve_space);
 
-
 /**
  * xdr_reserve_space_vec - Reserves a large amount of buffer space for sending
  * @xdr: pointer to xdr_stream
- * @vec: pointer to a kvec array
  * @nbytes: number of bytes to reserve
  *
- * Reserves enough buffer space to encode 'nbytes' of data and stores the
- * pointers in 'vec'. The size argument passed to xdr_reserve_space() is
- * determined based on the number of bytes remaining in the current page to
- * avoid invalidating iov_base pointers when xdr_commit_encode() is called.
+ * The size argument passed to xdr_reserve_space() is determined based
+ * on the number of bytes remaining in the current page to avoid
+ * invalidating iov_base pointers when xdr_commit_encode() is called.
+ *
+ * Return values:
+ *   %0: success
+ *   %-EMSGSIZE: not enough space is available in @xdr
  */
-int xdr_reserve_space_vec(struct xdr_stream *xdr, struct kvec *vec, size_t nbytes)
+int xdr_reserve_space_vec(struct xdr_stream *xdr, size_t nbytes)
 {
-	int thislen;
-	int v = 0;
+	size_t thislen;
 	__be32 *p;
 
 	/*
@@ -1105,21 +1097,19 @@ int xdr_reserve_space_vec(struct xdr_stream *xdr, struct kvec *vec, size_t nbyte
 		xdr->end = xdr->p;
 	}
 
+	/* XXX: Let's find a way to make this more efficient */
 	while (nbytes) {
 		thislen = xdr->buf->page_len % PAGE_SIZE;
 		thislen = min_t(size_t, nbytes, PAGE_SIZE - thislen);
 
 		p = xdr_reserve_space(xdr, thislen);
 		if (!p)
-			return -EIO;
+			return -EMSGSIZE;
 
-		vec[v].iov_base = p;
-		vec[v].iov_len = thislen;
-		v++;
 		nbytes -= thislen;
 	}
 
-	return v;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(xdr_reserve_space_vec);
 
@@ -1191,6 +1181,21 @@ void xdr_truncate_encode(struct xdr_stream *xdr, size_t len)
 	xdr->iov = buf->head;
 }
 EXPORT_SYMBOL(xdr_truncate_encode);
+
+/**
+ * xdr_truncate_decode - Truncate a decoding stream
+ * @xdr: pointer to struct xdr_stream
+ * @len: Number of bytes to remove
+ *
+ */
+void xdr_truncate_decode(struct xdr_stream *xdr, size_t len)
+{
+	unsigned int nbytes = xdr_align_size(len);
+
+	xdr->buf->len -= nbytes;
+	xdr->nwords -= XDR_QUADLEN(nbytes);
+}
+EXPORT_SYMBOL_GPL(xdr_truncate_decode);
 
 /**
  * xdr_restrict_buflen - decrease available buffer space
@@ -2274,3 +2279,60 @@ ssize_t xdr_stream_decode_string_dup(struct xdr_stream *xdr, char **str,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(xdr_stream_decode_string_dup);
+
+/**
+ * xdr_stream_decode_opaque_auth - Decode struct opaque_auth (RFC5531 S8.2)
+ * @xdr: pointer to xdr_stream
+ * @flavor: location to store decoded flavor
+ * @body: location to store decode body
+ * @body_len: location to store length of decoded body
+ *
+ * Return values:
+ *   On success, returns the number of buffer bytes consumed
+ *   %-EBADMSG on XDR buffer overflow
+ *   %-EMSGSIZE if the decoded size of the body field exceeds 400 octets
+ */
+ssize_t xdr_stream_decode_opaque_auth(struct xdr_stream *xdr, u32 *flavor,
+				      void **body, unsigned int *body_len)
+{
+	ssize_t ret, len;
+
+	len = xdr_stream_decode_u32(xdr, flavor);
+	if (unlikely(len < 0))
+		return len;
+	ret = xdr_stream_decode_opaque_inline(xdr, body, RPC_MAX_AUTH_SIZE);
+	if (unlikely(ret < 0))
+		return ret;
+	*body_len = ret;
+	return len + ret;
+}
+EXPORT_SYMBOL_GPL(xdr_stream_decode_opaque_auth);
+
+/**
+ * xdr_stream_encode_opaque_auth - Encode struct opaque_auth (RFC5531 S8.2)
+ * @xdr: pointer to xdr_stream
+ * @flavor: verifier flavor to encode
+ * @body: content of body to encode
+ * @body_len: length of body to encode
+ *
+ * Return values:
+ *   On success, returns length in bytes of XDR buffer consumed
+ *   %-EBADMSG on XDR buffer overflow
+ *   %-EMSGSIZE if the size of @body exceeds 400 octets
+ */
+ssize_t xdr_stream_encode_opaque_auth(struct xdr_stream *xdr, u32 flavor,
+				      void *body, unsigned int body_len)
+{
+	ssize_t ret, len;
+
+	if (unlikely(body_len > RPC_MAX_AUTH_SIZE))
+		return -EMSGSIZE;
+	len = xdr_stream_encode_u32(xdr, flavor);
+	if (unlikely(len < 0))
+		return len;
+	ret = xdr_stream_encode_opaque(xdr, body, body_len);
+	if (unlikely(ret < 0))
+		return ret;
+	return len + ret;
+}
+EXPORT_SYMBOL_GPL(xdr_stream_encode_opaque_auth);

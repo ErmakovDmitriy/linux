@@ -43,11 +43,11 @@
 #include "gt/intel_rps.h"
 
 #include "i915_active.h"
+#include "i915_config.h"
 #include "i915_deps.h"
 #include "i915_driver.h"
 #include "i915_drv.h"
 #include "i915_trace.h"
-#include "intel_pm.h"
 
 struct execute_cb {
 	struct irq_work work;
@@ -290,7 +290,7 @@ static enum hrtimer_restart __rq_watchdog_expired(struct hrtimer *hrtimer)
 
 	if (!i915_request_completed(rq)) {
 		if (llist_add(&rq->watchdog.link, &gt->watchdog.list))
-			schedule_work(&gt->watchdog.work);
+			queue_work(gt->i915->unordered_wq, &gt->watchdog.work);
 	} else {
 		i915_request_put(rq);
 	}

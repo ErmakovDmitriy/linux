@@ -56,12 +56,12 @@
 #include <linux/fec.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
-#include <linux/of_gpio.h>
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
 #include <linux/regulator/consumer.h>
 #include <linux/if_vlan.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/gpio/consumer.h>
 #include <linux/prefetch.h>
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
@@ -100,18 +100,19 @@ struct fec_devinfo {
 
 static const struct fec_devinfo fec_imx25_info = {
 	.quirks = FEC_QUIRK_USE_GASKET | FEC_QUIRK_MIB_CLEAR |
-		  FEC_QUIRK_HAS_FRREG,
+		  FEC_QUIRK_HAS_FRREG | FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx27_info = {
-	.quirks = FEC_QUIRK_MIB_CLEAR | FEC_QUIRK_HAS_FRREG,
+	.quirks = FEC_QUIRK_MIB_CLEAR | FEC_QUIRK_HAS_FRREG |
+		  FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx28_info = {
 	.quirks = FEC_QUIRK_ENET_MAC | FEC_QUIRK_SWAP_FRAME |
 		  FEC_QUIRK_SINGLE_MDIO | FEC_QUIRK_HAS_RACC |
 		  FEC_QUIRK_HAS_FRREG | FEC_QUIRK_CLEAR_SETUP_MII |
-		  FEC_QUIRK_NO_HARD_RESET,
+		  FEC_QUIRK_NO_HARD_RESET | FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx6q_info = {
@@ -119,11 +120,12 @@ static const struct fec_devinfo fec_imx6q_info = {
 		  FEC_QUIRK_HAS_BUFDESC_EX | FEC_QUIRK_HAS_CSUM |
 		  FEC_QUIRK_HAS_VLAN | FEC_QUIRK_ERR006358 |
 		  FEC_QUIRK_HAS_RACC | FEC_QUIRK_CLEAR_SETUP_MII |
-		  FEC_QUIRK_HAS_PMQOS,
+		  FEC_QUIRK_HAS_PMQOS | FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_mvf600_info = {
-	.quirks = FEC_QUIRK_ENET_MAC | FEC_QUIRK_HAS_RACC,
+	.quirks = FEC_QUIRK_ENET_MAC | FEC_QUIRK_HAS_RACC |
+		  FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx6x_info = {
@@ -132,7 +134,8 @@ static const struct fec_devinfo fec_imx6x_info = {
 		  FEC_QUIRK_HAS_VLAN | FEC_QUIRK_HAS_AVB |
 		  FEC_QUIRK_ERR007885 | FEC_QUIRK_BUG_CAPTURE |
 		  FEC_QUIRK_HAS_RACC | FEC_QUIRK_HAS_COALESCE |
-		  FEC_QUIRK_CLEAR_SETUP_MII | FEC_QUIRK_HAS_MULTI_QUEUES,
+		  FEC_QUIRK_CLEAR_SETUP_MII | FEC_QUIRK_HAS_MULTI_QUEUES |
+		  FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx6ul_info = {
@@ -140,7 +143,8 @@ static const struct fec_devinfo fec_imx6ul_info = {
 		  FEC_QUIRK_HAS_BUFDESC_EX | FEC_QUIRK_HAS_CSUM |
 		  FEC_QUIRK_HAS_VLAN | FEC_QUIRK_ERR007885 |
 		  FEC_QUIRK_BUG_CAPTURE | FEC_QUIRK_HAS_RACC |
-		  FEC_QUIRK_HAS_COALESCE | FEC_QUIRK_CLEAR_SETUP_MII,
+		  FEC_QUIRK_HAS_COALESCE | FEC_QUIRK_CLEAR_SETUP_MII |
+		  FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx8mq_info = {
@@ -150,7 +154,8 @@ static const struct fec_devinfo fec_imx8mq_info = {
 		  FEC_QUIRK_ERR007885 | FEC_QUIRK_BUG_CAPTURE |
 		  FEC_QUIRK_HAS_RACC | FEC_QUIRK_HAS_COALESCE |
 		  FEC_QUIRK_CLEAR_SETUP_MII | FEC_QUIRK_HAS_MULTI_QUEUES |
-		  FEC_QUIRK_HAS_EEE | FEC_QUIRK_WAKEUP_FROM_INT2,
+		  FEC_QUIRK_HAS_EEE | FEC_QUIRK_WAKEUP_FROM_INT2 |
+		  FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_imx8qm_info = {
@@ -160,14 +165,15 @@ static const struct fec_devinfo fec_imx8qm_info = {
 		  FEC_QUIRK_ERR007885 | FEC_QUIRK_BUG_CAPTURE |
 		  FEC_QUIRK_HAS_RACC | FEC_QUIRK_HAS_COALESCE |
 		  FEC_QUIRK_CLEAR_SETUP_MII | FEC_QUIRK_HAS_MULTI_QUEUES |
-		  FEC_QUIRK_DELAYED_CLKS_SUPPORT,
+		  FEC_QUIRK_DELAYED_CLKS_SUPPORT | FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static const struct fec_devinfo fec_s32v234_info = {
 	.quirks = FEC_QUIRK_ENET_MAC | FEC_QUIRK_HAS_GBIT |
 		  FEC_QUIRK_HAS_BUFDESC_EX | FEC_QUIRK_HAS_CSUM |
 		  FEC_QUIRK_HAS_VLAN | FEC_QUIRK_HAS_AVB |
-		  FEC_QUIRK_ERR007885 | FEC_QUIRK_BUG_CAPTURE,
+		  FEC_QUIRK_ERR007885 | FEC_QUIRK_BUG_CAPTURE |
+		  FEC_QUIRK_HAS_MDIO_C45,
 };
 
 static struct platform_device_id fec_devtype[] = {
@@ -1005,24 +1011,6 @@ static void fec_enet_enable_ring(struct net_device *ndev)
 	}
 }
 
-static void fec_enet_reset_skb(struct net_device *ndev)
-{
-	struct fec_enet_private *fep = netdev_priv(ndev);
-	struct fec_enet_priv_tx_q *txq;
-	int i, j;
-
-	for (i = 0; i < fep->num_tx_queues; i++) {
-		txq = fep->tx_queue[i];
-
-		for (j = 0; j < txq->bd.ring_size; j++) {
-			if (txq->tx_skbuff[j]) {
-				dev_kfree_skb_any(txq->tx_skbuff[j]);
-				txq->tx_skbuff[j] = NULL;
-			}
-		}
-	}
-}
-
 /*
  * This function is called to start or restart the FEC during a link
  * change, transmit timeout, or to reconfigure the FEC.  The network
@@ -1064,9 +1052,6 @@ fec_restart(struct net_device *ndev)
 	fec_enet_bd_init(ndev);
 
 	fec_enet_enable_ring(ndev);
-
-	/* Reset tx SKB buffers. */
-	fec_enet_reset_skb(ndev);
 
 	/* Enable MII mode */
 	if (fep->full_duplex == DUPLEX_FULL) {
@@ -1987,47 +1972,25 @@ static int fec_enet_mdio_wait(struct fec_enet_private *fep)
 	return ret;
 }
 
-static int fec_enet_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
+static int fec_enet_mdio_read_c22(struct mii_bus *bus, int mii_id, int regnum)
 {
 	struct fec_enet_private *fep = bus->priv;
 	struct device *dev = &fep->pdev->dev;
 	int ret = 0, frame_start, frame_addr, frame_op;
-	bool is_c45 = !!(regnum & MII_ADDR_C45);
 
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0)
 		return ret;
 
-	if (is_c45) {
-		frame_start = FEC_MMFR_ST_C45;
-
-		/* write address */
-		frame_addr = (regnum >> 16);
-		writel(frame_start | FEC_MMFR_OP_ADDR_WRITE |
-		       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(frame_addr) |
-		       FEC_MMFR_TA | (regnum & 0xFFFF),
-		       fep->hwp + FEC_MII_DATA);
-
-		/* wait for end of transfer */
-		ret = fec_enet_mdio_wait(fep);
-		if (ret) {
-			netdev_err(fep->netdev, "MDIO address write timeout\n");
-			goto out;
-		}
-
-		frame_op = FEC_MMFR_OP_READ_C45;
-
-	} else {
-		/* C22 read */
-		frame_op = FEC_MMFR_OP_READ;
-		frame_start = FEC_MMFR_ST;
-		frame_addr = regnum;
-	}
+	/* C22 read */
+	frame_op = FEC_MMFR_OP_READ;
+	frame_start = FEC_MMFR_ST;
+	frame_addr = regnum;
 
 	/* start a read op */
 	writel(frame_start | frame_op |
-		FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(frame_addr) |
-		FEC_MMFR_TA, fep->hwp + FEC_MII_DATA);
+	       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(frame_addr) |
+	       FEC_MMFR_TA, fep->hwp + FEC_MII_DATA);
 
 	/* wait for end of transfer */
 	ret = fec_enet_mdio_wait(fep);
@@ -2045,45 +2008,118 @@ out:
 	return ret;
 }
 
-static int fec_enet_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
-			   u16 value)
+static int fec_enet_mdio_read_c45(struct mii_bus *bus, int mii_id,
+				  int devad, int regnum)
 {
 	struct fec_enet_private *fep = bus->priv;
 	struct device *dev = &fep->pdev->dev;
-	int ret, frame_start, frame_addr;
-	bool is_c45 = !!(regnum & MII_ADDR_C45);
+	int ret = 0, frame_start, frame_op;
 
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0)
 		return ret;
 
-	if (is_c45) {
-		frame_start = FEC_MMFR_ST_C45;
+	frame_start = FEC_MMFR_ST_C45;
 
-		/* write address */
-		frame_addr = (regnum >> 16);
-		writel(frame_start | FEC_MMFR_OP_ADDR_WRITE |
-		       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(frame_addr) |
-		       FEC_MMFR_TA | (regnum & 0xFFFF),
-		       fep->hwp + FEC_MII_DATA);
+	/* write address */
+	writel(frame_start | FEC_MMFR_OP_ADDR_WRITE |
+	       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(devad) |
+	       FEC_MMFR_TA | (regnum & 0xFFFF),
+	       fep->hwp + FEC_MII_DATA);
 
-		/* wait for end of transfer */
-		ret = fec_enet_mdio_wait(fep);
-		if (ret) {
-			netdev_err(fep->netdev, "MDIO address write timeout\n");
-			goto out;
-		}
-	} else {
-		/* C22 write */
-		frame_start = FEC_MMFR_ST;
-		frame_addr = regnum;
+	/* wait for end of transfer */
+	ret = fec_enet_mdio_wait(fep);
+	if (ret) {
+		netdev_err(fep->netdev, "MDIO address write timeout\n");
+		goto out;
+	}
+
+	frame_op = FEC_MMFR_OP_READ_C45;
+
+	/* start a read op */
+	writel(frame_start | frame_op |
+	       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(devad) |
+	       FEC_MMFR_TA, fep->hwp + FEC_MII_DATA);
+
+	/* wait for end of transfer */
+	ret = fec_enet_mdio_wait(fep);
+	if (ret) {
+		netdev_err(fep->netdev, "MDIO read timeout\n");
+		goto out;
+	}
+
+	ret = FEC_MMFR_DATA(readl(fep->hwp + FEC_MII_DATA));
+
+out:
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
+
+	return ret;
+}
+
+static int fec_enet_mdio_write_c22(struct mii_bus *bus, int mii_id, int regnum,
+				   u16 value)
+{
+	struct fec_enet_private *fep = bus->priv;
+	struct device *dev = &fep->pdev->dev;
+	int ret, frame_start, frame_addr;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
+		return ret;
+
+	/* C22 write */
+	frame_start = FEC_MMFR_ST;
+	frame_addr = regnum;
+
+	/* start a write op */
+	writel(frame_start | FEC_MMFR_OP_WRITE |
+	       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(frame_addr) |
+	       FEC_MMFR_TA | FEC_MMFR_DATA(value),
+	       fep->hwp + FEC_MII_DATA);
+
+	/* wait for end of transfer */
+	ret = fec_enet_mdio_wait(fep);
+	if (ret)
+		netdev_err(fep->netdev, "MDIO write timeout\n");
+
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
+
+	return ret;
+}
+
+static int fec_enet_mdio_write_c45(struct mii_bus *bus, int mii_id,
+				   int devad, int regnum, u16 value)
+{
+	struct fec_enet_private *fep = bus->priv;
+	struct device *dev = &fep->pdev->dev;
+	int ret, frame_start;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
+		return ret;
+
+	frame_start = FEC_MMFR_ST_C45;
+
+	/* write address */
+	writel(frame_start | FEC_MMFR_OP_ADDR_WRITE |
+	       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(devad) |
+	       FEC_MMFR_TA | (regnum & 0xFFFF),
+	       fep->hwp + FEC_MII_DATA);
+
+	/* wait for end of transfer */
+	ret = fec_enet_mdio_wait(fep);
+	if (ret) {
+		netdev_err(fep->netdev, "MDIO address write timeout\n");
+		goto out;
 	}
 
 	/* start a write op */
 	writel(frame_start | FEC_MMFR_OP_WRITE |
-		FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(frame_addr) |
-		FEC_MMFR_TA | FEC_MMFR_DATA(value),
-		fep->hwp + FEC_MII_DATA);
+	       FEC_MMFR_PA(mii_id) | FEC_MMFR_RA(devad) |
+	       FEC_MMFR_TA | FEC_MMFR_DATA(value),
+	       fep->hwp + FEC_MII_DATA);
 
 	/* wait for end of transfer */
 	ret = fec_enet_mdio_wait(fep);
@@ -2381,8 +2417,12 @@ static int fec_enet_mii_init(struct platform_device *pdev)
 	}
 
 	fep->mii_bus->name = "fec_enet_mii_bus";
-	fep->mii_bus->read = fec_enet_mdio_read;
-	fep->mii_bus->write = fec_enet_mdio_write;
+	fep->mii_bus->read = fec_enet_mdio_read_c22;
+	fep->mii_bus->write = fec_enet_mdio_write_c22;
+	if (fep->quirks & FEC_QUIRK_HAS_MDIO_C45) {
+		fep->mii_bus->read_c45 = fec_enet_mdio_read_c45;
+		fep->mii_bus->write_c45 = fec_enet_mdio_write_c45;
+	}
 	snprintf(fep->mii_bus->id, MII_BUS_ID_SIZE, "%s-%x",
 		pdev->name, fep->dev_id + 1);
 	fep->mii_bus->priv = fep;
@@ -2749,6 +2789,7 @@ static void fec_enet_get_xdp_stats(struct fec_enet_private *fep, u64 *data)
 
 static void fec_enet_page_pool_stats(struct fec_enet_private *fep, u64 *data)
 {
+#ifdef CONFIG_PAGE_POOL_STATS
 	struct page_pool_stats stats = {};
 	struct fec_enet_priv_rx_q *rxq;
 	int i;
@@ -2763,6 +2804,7 @@ static void fec_enet_page_pool_stats(struct fec_enet_private *fep, u64 *data)
 	}
 
 	page_pool_ethtool_stats_get(data, &stats);
+#endif
 }
 
 static void fec_enet_get_ethtool_stats(struct net_device *dev,
@@ -3730,19 +3772,18 @@ static int fec_enet_txq_xmit_frame(struct fec_enet_private *fep,
 				   struct xdp_frame *frame)
 {
 	unsigned int index, status, estatus;
-	struct bufdesc *bdp, *last_bdp;
+	struct bufdesc *bdp;
 	dma_addr_t dma_addr;
 	int entries_free;
 
 	entries_free = fec_enet_get_free_txdesc_num(txq);
 	if (entries_free < MAX_SKB_FRAGS + 1) {
 		netdev_err(fep->netdev, "NOT enough BD for SG!\n");
-		return NETDEV_TX_OK;
+		return -EBUSY;
 	}
 
 	/* Fill in a Tx ring entry */
 	bdp = txq->bd.cur;
-	last_bdp = bdp;
 	status = fec16_to_cpu(bdp->cbd_sc);
 	status &= ~BD_ENET_TX_STATS;
 
@@ -3751,7 +3792,7 @@ static int fec_enet_txq_xmit_frame(struct fec_enet_private *fep,
 	dma_addr = dma_map_single(&fep->pdev->dev, frame->data,
 				  frame->len, DMA_TO_DEVICE);
 	if (dma_mapping_error(&fep->pdev->dev, dma_addr))
-		return FEC_ENET_XDP_CONSUMED;
+		return -ENOMEM;
 
 	status |= (BD_ENET_TX_INTR | BD_ENET_TX_LAST);
 	if (fep->bufdesc_ex)
@@ -3770,8 +3811,12 @@ static int fec_enet_txq_xmit_frame(struct fec_enet_private *fep,
 		ebdp->cbd_esc = cpu_to_fec32(estatus);
 	}
 
-	index = fec_enet_get_bd_index(last_bdp, &txq->bd);
 	txq->tx_skbuff[index] = NULL;
+
+	/* Make sure the updates to rest of the descriptor are performed before
+	 * transferring ownership.
+	 */
+	dma_wmb();
 
 	/* Send it on its way.  Tell FEC it's ready, interrupt when done,
 	 * it's the last BD of the frame, and to put the CRC on the end.
@@ -3780,9 +3825,15 @@ static int fec_enet_txq_xmit_frame(struct fec_enet_private *fep,
 	bdp->cbd_sc = cpu_to_fec16(status);
 
 	/* If this was the last BD in the ring, start at the beginning again. */
-	bdp = fec_enet_get_nextdesc(last_bdp, &txq->bd);
+	bdp = fec_enet_get_nextdesc(bdp, &txq->bd);
+
+	/* Make sure the update to bdp are performed before txq->bd.cur. */
+	dma_wmb();
 
 	txq->bd.cur = bdp;
+
+	/* Trigger transmission start */
+	writel(0, txq->bd.reg_desc_active);
 
 	return 0;
 }
@@ -3795,6 +3846,7 @@ static int fec_enet_xdp_xmit(struct net_device *dev,
 	struct fec_enet_private *fep = netdev_priv(dev);
 	struct fec_enet_priv_tx_q *txq;
 	int cpu = smp_processor_id();
+	unsigned int sent_frames = 0;
 	struct netdev_queue *nq;
 	unsigned int queue;
 	int i;
@@ -3805,18 +3857,15 @@ static int fec_enet_xdp_xmit(struct net_device *dev,
 
 	__netif_tx_lock(nq, cpu);
 
-	for (i = 0; i < num_frames; i++)
-		fec_enet_txq_xmit_frame(fep, txq, frames[i]);
-
-	/* Make sure the update to bdp and tx_skbuff are performed. */
-	wmb();
-
-	/* Trigger transmission start */
-	writel(0, txq->bd.reg_desc_active);
+	for (i = 0; i < num_frames; i++) {
+		if (fec_enet_txq_xmit_frame(fep, txq, frames[i]) < 0)
+			break;
+		sent_frames++;
+	}
 
 	__netif_tx_unlock(nq);
 
-	return num_frames;
+	return sent_frames;
 }
 
 static const struct net_device_ops fec_netdev_ops = {
@@ -3965,6 +4014,11 @@ static int fec_enet_init(struct net_device *ndev)
 
 	ndev->hw_features = ndev->features;
 
+	if (!(fep->quirks & FEC_QUIRK_SWAP_FRAME))
+		ndev->xdp_features = NETDEV_XDP_ACT_BASIC |
+				     NETDEV_XDP_ACT_REDIRECT |
+				     NETDEV_XDP_ACT_NDO_XMIT;
+
 	fec_restart(ndev);
 
 	if (fep->quirks & FEC_QUIRK_MIB_CLEAR)
@@ -3982,10 +4036,10 @@ free_queue_mem:
 #ifdef CONFIG_OF
 static int fec_reset_phy(struct platform_device *pdev)
 {
-	int err, phy_reset;
-	bool active_high = false;
+	struct gpio_desc *phy_reset;
 	int msec = 1, phy_post_delay = 0;
 	struct device_node *np = pdev->dev.of_node;
+	int err;
 
 	if (!np)
 		return 0;
@@ -3995,33 +4049,26 @@ static int fec_reset_phy(struct platform_device *pdev)
 	if (!err && msec > 1000)
 		msec = 1;
 
-	phy_reset = of_get_named_gpio(np, "phy-reset-gpios", 0);
-	if (phy_reset == -EPROBE_DEFER)
-		return phy_reset;
-	else if (!gpio_is_valid(phy_reset))
-		return 0;
-
 	err = of_property_read_u32(np, "phy-reset-post-delay", &phy_post_delay);
 	/* valid reset duration should be less than 1s */
 	if (!err && phy_post_delay > 1000)
 		return -EINVAL;
 
-	active_high = of_property_read_bool(np, "phy-reset-active-high");
+	phy_reset = devm_gpiod_get_optional(&pdev->dev, "phy-reset",
+					    GPIOD_OUT_HIGH);
+	if (IS_ERR(phy_reset))
+		return dev_err_probe(&pdev->dev, PTR_ERR(phy_reset),
+				     "failed to get phy-reset-gpios\n");
 
-	err = devm_gpio_request_one(&pdev->dev, phy_reset,
-			active_high ? GPIOF_OUT_INIT_HIGH : GPIOF_OUT_INIT_LOW,
-			"phy-reset");
-	if (err) {
-		dev_err(&pdev->dev, "failed to get phy-reset-gpios: %d\n", err);
-		return err;
-	}
+	if (!phy_reset)
+		return 0;
 
 	if (msec > 20)
 		msleep(msec);
 	else
 		usleep_range(msec * 1000, msec * 1000 + 1000);
 
-	gpio_set_value_cansleep(phy_reset, !active_high);
+	gpiod_set_value_cansleep(phy_reset, 0);
 
 	if (!phy_post_delay)
 		return 0;
@@ -4205,7 +4252,7 @@ fec_probe(struct platform_device *pdev)
 	if (ret)
 		goto failed_ipc_init;
 
-	if (of_get_property(np, "fsl,magic-packet", NULL))
+	if (of_property_read_bool(np, "fsl,magic-packet"))
 		fep->wol_flag |= FEC_WOL_HAS_MAGIC_PACKET;
 
 	ret = fec_enet_init_stop_mode(fep, np);
@@ -4419,9 +4466,11 @@ fec_drv_remove(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	int ret;
 
-	ret = pm_runtime_resume_and_get(&pdev->dev);
+	ret = pm_runtime_get_sync(&pdev->dev);
 	if (ret < 0)
-		return ret;
+		dev_err(&pdev->dev,
+			"Failed to resume device in remove callback (%pe)\n",
+			ERR_PTR(ret));
 
 	cancel_work_sync(&fep->tx_timeout_work);
 	fec_ptp_stop(pdev);
@@ -4434,8 +4483,13 @@ fec_drv_remove(struct platform_device *pdev)
 		of_phy_deregister_fixed_link(np);
 	of_node_put(fep->phy_node);
 
-	clk_disable_unprepare(fep->clk_ahb);
-	clk_disable_unprepare(fep->clk_ipg);
+	/* After pm_runtime_get_sync() failed, the clks are still off, so skip
+	 * disabling them again.
+	 */
+	if (ret >= 0) {
+		clk_disable_unprepare(fep->clk_ahb);
+		clk_disable_unprepare(fep->clk_ipg);
+	}
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 

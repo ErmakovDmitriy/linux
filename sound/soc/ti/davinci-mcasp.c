@@ -1328,15 +1328,16 @@ static int davinci_mcasp_hw_rule_slot_width(struct snd_pcm_hw_params *params,
 	struct davinci_mcasp_ruledata *rd = rule->private;
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 	struct snd_mask nfmt;
-	int i, slot_width;
+	int slot_width;
+	snd_pcm_format_t i;
 
 	snd_mask_none(&nfmt);
 	slot_width = rd->mcasp->slot_width;
 
-	for (i = 0; i <= SNDRV_PCM_FORMAT_LAST; i++) {
-		if (snd_mask_test(fmt, i)) {
+	pcm_for_each_format(i) {
+		if (snd_mask_test_format(fmt, i)) {
 			if (snd_pcm_format_width(i) <= slot_width) {
-				snd_mask_set(&nfmt, i);
+				snd_mask_set_format(&nfmt, i);
 			}
 		}
 	}
@@ -1350,15 +1351,16 @@ static int davinci_mcasp_hw_rule_format_width(struct snd_pcm_hw_params *params,
 	struct davinci_mcasp_ruledata *rd = rule->private;
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 	struct snd_mask nfmt;
-	int i, format_width;
+	int format_width;
+	snd_pcm_format_t i;
 
 	snd_mask_none(&nfmt);
 	format_width = rd->mcasp->max_format_width;
 
-	for (i = 0; i <= SNDRV_PCM_FORMAT_LAST; i++) {
-		if (snd_mask_test(fmt, i)) {
+	pcm_for_each_format(i) {
+		if (snd_mask_test_format(fmt, i)) {
 			if (snd_pcm_format_width(i) == format_width) {
-				snd_mask_set(&nfmt, i);
+				snd_mask_set_format(&nfmt, i);
 			}
 		}
 	}
@@ -1431,12 +1433,13 @@ static int davinci_mcasp_hw_rule_format(struct snd_pcm_hw_params *params,
 	struct snd_mask nfmt;
 	int rate = params_rate(params);
 	int slots = rd->mcasp->tdm_slots;
-	int i, count = 0;
+	int count = 0;
+	snd_pcm_format_t i;
 
 	snd_mask_none(&nfmt);
 
-	for (i = 0; i <= SNDRV_PCM_FORMAT_LAST; i++) {
-		if (snd_mask_test(fmt, i)) {
+	pcm_for_each_format(i) {
+		if (snd_mask_test_format(fmt, i)) {
 			uint sbits = snd_pcm_format_width(i);
 			unsigned int sysclk_freq;
 			int ppm;
@@ -1454,7 +1457,7 @@ static int davinci_mcasp_hw_rule_format(struct snd_pcm_hw_params *params,
 							 sbits * slots * rate,
 							 false);
 			if (abs(ppm) < DAVINCI_MAX_RATE_ERROR_PPM) {
-				snd_mask_set(&nfmt, i);
+				snd_mask_set_format(&nfmt, i);
 				count++;
 			}
 		}
@@ -1699,9 +1702,10 @@ static void davinci_mcasp_init_iec958_status(struct davinci_mcasp *mcasp)
 static int davinci_mcasp_dai_probe(struct snd_soc_dai *dai)
 {
 	struct davinci_mcasp *mcasp = snd_soc_dai_get_drvdata(dai);
+	int stream;
 
-	dai->playback_dma_data = &mcasp->dma_data[SNDRV_PCM_STREAM_PLAYBACK];
-	dai->capture_dma_data = &mcasp->dma_data[SNDRV_PCM_STREAM_CAPTURE];
+	for_each_pcm_streams(stream)
+		snd_soc_dai_dma_data_set(dai, stream, &mcasp->dma_data[stream]);
 
 	if (mcasp->op_mode == DAVINCI_MCASP_DIT_MODE) {
 		davinci_mcasp_init_iec958_status(mcasp);
@@ -2460,11 +2464,9 @@ err:
 	return ret;
 }
 
-static int davinci_mcasp_remove(struct platform_device *pdev)
+static void davinci_mcasp_remove(struct platform_device *pdev)
 {
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -2530,7 +2532,7 @@ static const struct dev_pm_ops davinci_mcasp_pm_ops = {
 
 static struct platform_driver davinci_mcasp_driver = {
 	.probe		= davinci_mcasp_probe,
-	.remove		= davinci_mcasp_remove,
+	.remove_new	= davinci_mcasp_remove,
 	.driver		= {
 		.name	= "davinci-mcasp",
 		.pm     = &davinci_mcasp_pm_ops,

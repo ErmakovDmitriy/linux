@@ -124,11 +124,10 @@ EXPORT_SYMBOL_GPL(snd_hdac_stream_init);
 /**
  * snd_hdac_stream_start - start a stream
  * @azx_dev: HD-audio core stream to start
- * @fresh_start: false = wallclock timestamp relative to period wallclock
  *
  * Start a stream, set start_wallclk and set the running flag.
  */
-void snd_hdac_stream_start(struct hdac_stream *azx_dev, bool fresh_start)
+void snd_hdac_stream_start(struct hdac_stream *azx_dev)
 {
 	struct hdac_bus *bus = azx_dev->bus;
 	int stripe_ctl;
@@ -136,8 +135,6 @@ void snd_hdac_stream_start(struct hdac_stream *azx_dev, bool fresh_start)
 	trace_snd_hdac_stream_start(bus, azx_dev);
 
 	azx_dev->start_wallclk = snd_hdac_chip_readl(bus, WALLCLK);
-	if (!fresh_start)
-		azx_dev->start_wallclk -= azx_dev->period_wallclk;
 
 	/* enable SIE */
 	snd_hdac_chip_updatel(bus, INTCTL,
@@ -153,7 +150,11 @@ void snd_hdac_stream_start(struct hdac_stream *azx_dev, bool fresh_start)
 					stripe_ctl);
 	}
 	/* set DMA start and interrupt mask */
-	snd_hdac_stream_updateb(azx_dev, SD_CTL,
+	if (bus->access_sdnctl_in_dword)
+		snd_hdac_stream_updatel(azx_dev, SD_CTL,
+				0, SD_CTL_DMA_START | SD_INT_MASK);
+	else
+		snd_hdac_stream_updateb(azx_dev, SD_CTL,
 				0, SD_CTL_DMA_START | SD_INT_MASK);
 	azx_dev->running = true;
 }
@@ -966,7 +967,7 @@ EXPORT_SYMBOL_GPL(snd_hdac_dsp_prepare);
 void snd_hdac_dsp_trigger(struct hdac_stream *azx_dev, bool start)
 {
 	if (start)
-		snd_hdac_stream_start(azx_dev, true);
+		snd_hdac_stream_start(azx_dev);
 	else
 		snd_hdac_stream_stop(azx_dev);
 }

@@ -13,17 +13,9 @@
 #include <sound/sof/ipc4/header.h>
 #include "sof-priv.h"
 #include "sof-audio.h"
+#include "ipc4-fw-reg.h"
 #include "ipc4-priv.h"
 #include "ops.h"
-
-#ifdef DEBUG_VERBOSE
-#define sof_ipc4_dump_payload(sdev, ipc_data, size)			\
-		print_hex_dump_debug("Message payload: ",		\
-				     DUMP_PREFIX_OFFSET,		\
-				     16, 4, ipc_data, size, false)
-#else
-#define sof_ipc4_dump_payload(sdev, ipc_data, size)	do { } while (0)
-#endif
 
 static const struct sof_ipc4_fw_status {
 	int status;
@@ -255,6 +247,13 @@ static void sof_ipc4_log_header(struct device *dev, u8 *text, struct sof_ipc4_ms
 }
 #endif
 
+static void sof_ipc4_dump_payload(struct snd_sof_dev *sdev,
+				  void *ipc_data, size_t size)
+{
+	print_hex_dump_debug("Message payload: ", DUMP_PREFIX_OFFSET,
+			     16, 4, ipc_data, size, false);
+}
+
 static int sof_ipc4_get_reply(struct snd_sof_dev *sdev)
 {
 	struct snd_sof_ipc_msg *msg = sdev->msg;
@@ -361,31 +360,41 @@ static int sof_ipc4_tx_msg(struct snd_sof_dev *sdev, void *msg_data, size_t msg_
 			   void *reply_data, size_t reply_bytes, bool no_pm)
 {
 	struct snd_sof_ipc *ipc = sdev->ipc;
-#ifdef DEBUG_VERBOSE
-	struct sof_ipc4_msg *msg = NULL;
-#endif
 	int ret;
 
 	if (!msg_data)
 		return -EINVAL;
+
+	if (!no_pm) {
+		const struct sof_dsp_power_state target_state = {
+			.state = SOF_DSP_PM_D0,
+		};
+
+		/* ensure the DSP is in D0i0 before sending a new IPC */
+		ret = snd_sof_dsp_set_power_state(sdev, &target_state);
+		if (ret < 0)
+			return ret;
+	}
 
 	/* Serialise IPC TX */
 	mutex_lock(&ipc->tx_mutex);
 
 	ret = ipc4_tx_msg_unlocked(ipc, msg_data, msg_bytes, reply_data, reply_bytes);
 
+	if (sof_debug_check_flag(SOF_DBG_DUMP_IPC_MESSAGE_PAYLOAD)) {
+		struct sof_ipc4_msg *msg = NULL;
+
+		/* payload is indicated by non zero msg/reply_bytes */
+		if (msg_bytes)
+			msg = msg_data;
+		else if (reply_bytes)
+			msg = reply_data;
+
+		if (msg)
+			sof_ipc4_dump_payload(sdev, msg->data_ptr, msg->data_size);
+	}
+
 	mutex_unlock(&ipc->tx_mutex);
-
-#ifdef DEBUG_VERBOSE
-	/* payload is indicated by non zero msg/reply_bytes */
-	if (msg_bytes)
-		msg = msg_data;
-	else if (reply_bytes)
-		msg = reply_data;
-
-	if (msg)
-		sof_ipc4_dump_payload(sdev, msg->data_ptr, msg->data_size);
-#endif
 
 	return ret;
 }
@@ -393,6 +402,9 @@ static int sof_ipc4_tx_msg(struct snd_sof_dev *sdev, void *msg_data, size_t msg_
 static int sof_ipc4_set_get_data(struct snd_sof_dev *sdev, void *data,
 				 size_t payload_bytes, bool set)
 {
+	const struct sof_dsp_power_state target_state = {
+			.state = SOF_DSP_PM_D0,
+	};
 	size_t payload_limit = sdev->ipc->max_payload_size;
 	struct sof_ipc4_msg *ipc4_msg = data;
 	struct sof_ipc4_msg tx = {{ 0 }};
@@ -422,6 +434,11 @@ static int sof_ipc4_set_get_data(struct snd_sof_dev *sdev, void *data,
 	tx.extension |= SOF_IPC4_MOD_EXT_MSG_SIZE(payload_bytes);
 
 	tx.extension |= SOF_IPC4_MOD_EXT_MSG_FIRST_BLOCK(1);
+
+	/* ensure the DSP is in D0i0 before sending IPC */
+	ret = snd_sof_dsp_set_power_state(sdev, &target_state);
+	if (ret < 0)
+		return ret;
 
 	/* Serialise IPC TX */
 	mutex_lock(&sdev->ipc->tx_mutex);
@@ -496,7 +513,8 @@ static int sof_ipc4_set_get_data(struct snd_sof_dev *sdev, void *data,
 	if (!set && payload_bytes != offset)
 		ipc4_msg->data_size = offset;
 
-	sof_ipc4_dump_payload(sdev, ipc4_msg->data_ptr, ipc4_msg->data_size);
+	if (sof_debug_check_flag(SOF_DBG_DUMP_IPC_MESSAGE_PAYLOAD))
+		sof_ipc4_dump_payload(sdev, ipc4_msg->data_ptr, ipc4_msg->data_size);
 
 out:
 	mutex_unlock(&sdev->ipc->tx_mutex);
@@ -542,6 +560,8 @@ static int ipc4_fw_ready(struct snd_sof_dev *sdev, struct sof_ipc4_msg *ipc4_msg
 	outbox_offset = snd_sof_dsp_get_window_offset(sdev, SOF_IPC4_OUTBOX_WINDOW_IDX);
 	outbox_size = SOF_IPC4_MSG_MAX_SIZE;
 
+	sdev->fw_info_box.offset = snd_sof_dsp_get_window_offset(sdev, SOF_IPC4_INBOX_WINDOW_IDX);
+	sdev->fw_info_box.size = sizeof(struct sof_ipc4_fw_registers);
 	sdev->dsp_box.offset = inbox_offset;
 	sdev->dsp_box.size = inbox_size;
 	sdev->host_box.offset = outbox_offset;
@@ -653,14 +673,29 @@ static int sof_ipc4_ctx_save(struct snd_sof_dev *sdev)
 	return sof_ipc4_set_core_state(sdev, SOF_DSP_PRIMARY_CORE, false);
 }
 
+static int sof_ipc4_set_pm_gate(struct snd_sof_dev *sdev, u32 flags)
+{
+	struct sof_ipc4_msg msg = {{0}};
+
+	msg.primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_MOD_SET_D0IX);
+	msg.primary |= SOF_IPC4_MSG_DIR(SOF_IPC4_MSG_REQUEST);
+	msg.primary |= SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG);
+	msg.extension = flags;
+
+	return sof_ipc4_tx_msg(sdev, &msg, 0, NULL, 0, true);
+}
+
 static const struct sof_ipc_pm_ops ipc4_pm_ops = {
 	.ctx_save = sof_ipc4_ctx_save,
 	.set_core_state = sof_ipc4_set_core_state,
+	.set_pm_gate = sof_ipc4_set_pm_gate,
 };
 
 static int sof_ipc4_init(struct snd_sof_dev *sdev)
 {
 	struct sof_ipc4_fw_data *ipc4_data = sdev->private;
+
+	mutex_init(&ipc4_data->pipeline_state_mutex);
 
 	xa_init_flags(&ipc4_data->fw_lib_xa, XA_FLAGS_ALLOC);
 

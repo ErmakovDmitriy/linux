@@ -90,13 +90,6 @@ static inline int range_is_allowed(unsigned long pfn, unsigned long size)
 }
 #endif
 
-#ifndef unxlate_dev_mem_ptr
-#define unxlate_dev_mem_ptr unxlate_dev_mem_ptr
-void __weak unxlate_dev_mem_ptr(phys_addr_t phys, void *addr)
-{
-}
-#endif
-
 static inline bool should_stop_iteration(void)
 {
 	if (need_resched())
@@ -343,7 +336,7 @@ static unsigned zero_mmap_capabilities(struct file *file)
 /* can't do an in-place private mapping if there's no MMU */
 static inline int private_mapping_ok(struct vm_area_struct *vma)
 {
-	return vma->vm_flags & VM_MAYSHARE;
+	return is_nommu_shared_mapping(vma->vm_flags);
 }
 #else
 
@@ -762,7 +755,7 @@ static int __init chr_dev_init(void)
 	if (register_chrdev(MEM_MAJOR, "mem", &memory_fops))
 		printk("unable to get major %d for memory devs\n", MEM_MAJOR);
 
-	mem_class = class_create(THIS_MODULE, "mem");
+	mem_class = class_create("mem");
 	if (IS_ERR(mem_class))
 		return PTR_ERR(mem_class);
 

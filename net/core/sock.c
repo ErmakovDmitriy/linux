@@ -114,6 +114,9 @@
 #include <linux/memcontrol.h>
 #include <linux/prefetch.h>
 #include <linux/compat.h>
+#include <linux/mroute.h>
+#include <linux/mroute6.h>
+#include <linux/icmpv6.h>
 
 #include <linux/uaccess.h>
 
@@ -138,6 +141,7 @@
 
 #include <net/tcp.h>
 #include <net/busy_poll.h>
+#include <net/phonet/phonet.h>
 
 #include <linux/ethtool.h>
 
@@ -1246,6 +1250,13 @@ set_sndbuf:
 			clear_bit(SOCK_PASSCRED, &sock->flags);
 		break;
 
+	case SO_PASSPIDFD:
+		if (valbool)
+			set_bit(SOCK_PASSPIDFD, &sock->flags);
+		else
+			clear_bit(SOCK_PASSPIDFD, &sock->flags);
+		break;
+
 	case SO_TIMESTAMP_OLD:
 	case SO_TIMESTAMP_NEW:
 	case SO_TIMESTAMPNS_OLD:
@@ -1362,12 +1373,6 @@ set_sndbuf:
 		__sock_set_mark(sk, val);
 		break;
 	case SO_RCVMARK:
-		if (!sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_RAW) &&
-		    !sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
-			ret = -EPERM;
-			break;
-		}
-
 		sock_valbool_flag(sk, SOCK_RCVMARK, valbool);
 		break;
 
@@ -1396,15 +1401,10 @@ set_sndbuf:
 
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	case SO_BUSY_POLL:
-		/* allow unprivileged users to decrease the value */
-		if ((val > sk->sk_ll_usec) && !sockopt_capable(CAP_NET_ADMIN))
-			ret = -EPERM;
-		else {
-			if (val < 0)
-				ret = -EINVAL;
-			else
-				WRITE_ONCE(sk->sk_ll_usec, val);
-		}
+		if (val < 0)
+			ret = -EINVAL;
+		else
+			WRITE_ONCE(sk->sk_ll_usec, val);
 		break;
 	case SO_PREFER_BUSY_POLL:
 		if (valbool && !sockopt_capable(CAP_NET_ADMIN))
@@ -1737,6 +1737,10 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		v.val = !!test_bit(SOCK_PASSCRED, &sock->flags);
 		break;
 
+	case SO_PASSPIDFD:
+		v.val = !!test_bit(SOCK_PASSPIDFD, &sock->flags);
+		break;
+
 	case SO_PEERCRED:
 	{
 		struct ucred peercred;
@@ -1750,6 +1754,39 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		if (copy_to_sockptr(optval, &peercred, len))
 			return -EFAULT;
 		goto lenout;
+	}
+
+	case SO_PEERPIDFD:
+	{
+		struct pid *peer_pid;
+		struct file *pidfd_file = NULL;
+		int pidfd;
+
+		if (len > sizeof(pidfd))
+			len = sizeof(pidfd);
+
+		spin_lock(&sk->sk_peer_lock);
+		peer_pid = get_pid(sk->sk_peer_pid);
+		spin_unlock(&sk->sk_peer_lock);
+
+		if (!peer_pid)
+			return -ESRCH;
+
+		pidfd = pidfd_prepare(peer_pid, 0, &pidfd_file);
+		put_pid(peer_pid);
+		if (pidfd < 0)
+			return pidfd;
+
+		if (copy_to_sockptr(optval, &pidfd, len) ||
+		    copy_to_sockptr(optlen, &len, sizeof(int))) {
+			put_unused_fd(pidfd);
+			fput(pidfd_file);
+
+			return -EFAULT;
+		}
+
+		fd_install(pidfd, pidfd_file);
+		return 0;
 	}
 
 	case SO_PEERGROUPS:
@@ -2340,17 +2377,6 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 	smp_wmb();
 	refcount_set(&newsk->sk_refcnt, 2);
 
-	/* Increment the counter in the same struct proto as the master
-	 * sock (sk_refcnt_debug_inc uses newsk->sk_prot->socks, that
-	 * is the same as sk->sk_prot->socks, as this field was copied
-	 * with memcpy).
-	 *
-	 * This _changes_ the previous behaviour, where
-	 * tcp_create_openreq_child always was incrementing the
-	 * equivalent to tcp_prot->socks (inet_sock_nr), so this have
-	 * to be taken into account in all callers. -acme
-	 */
-	sk_refcnt_debug_inc(newsk);
 	sk_set_socket(newsk, NULL);
 	sk_tx_queue_clear(newsk);
 	RCU_INIT_POINTER(newsk->sk_wq, NULL);
@@ -2375,24 +2401,28 @@ void sk_free_unlock_clone(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(sk_free_unlock_clone);
 
-static void sk_trim_gso_size(struct sock *sk)
+static u32 sk_dst_gso_max_size(struct sock *sk, struct dst_entry *dst)
 {
-	if (sk->sk_gso_max_size <= GSO_LEGACY_MAX_SIZE)
-		return;
+	bool is_ipv6 = false;
+	u32 max_size;
+
 #if IS_ENABLED(CONFIG_IPV6)
-	if (sk->sk_family == AF_INET6 &&
-	    sk_is_tcp(sk) &&
-	    !ipv6_addr_v4mapped(&sk->sk_v6_rcv_saddr))
-		return;
+	is_ipv6 = (sk->sk_family == AF_INET6 &&
+		   !ipv6_addr_v4mapped(&sk->sk_v6_rcv_saddr));
 #endif
-	sk->sk_gso_max_size = GSO_LEGACY_MAX_SIZE;
+	/* pairs with the WRITE_ONCE() in netif_set_gso(_ipv4)_max_size() */
+	max_size = is_ipv6 ? READ_ONCE(dst->dev->gso_max_size) :
+			READ_ONCE(dst->dev->gso_ipv4_max_size);
+	if (max_size > GSO_LEGACY_MAX_SIZE && !sk_is_tcp(sk))
+		max_size = GSO_LEGACY_MAX_SIZE;
+
+	return max_size - (MAX_TCP_HEADER + 1);
 }
 
 void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 {
 	u32 max_segs = 1;
 
-	sk_dst_set(sk, dst);
 	sk->sk_route_caps = dst->dev->features;
 	if (sk_is_tcp(sk))
 		sk->sk_route_caps |= NETIF_F_GSO;
@@ -2405,15 +2435,13 @@ void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 			sk->sk_route_caps &= ~NETIF_F_GSO_MASK;
 		} else {
 			sk->sk_route_caps |= NETIF_F_SG | NETIF_F_HW_CSUM;
-			/* pairs with the WRITE_ONCE() in netif_set_gso_max_size() */
-			sk->sk_gso_max_size = READ_ONCE(dst->dev->gso_max_size);
-			sk_trim_gso_size(sk);
-			sk->sk_gso_max_size -= (MAX_TCP_HEADER + 1);
+			sk->sk_gso_max_size = sk_dst_gso_max_size(sk, dst);
 			/* pairs with the WRITE_ONCE() in netif_set_gso_max_segs() */
 			max_segs = max_t(u32, READ_ONCE(dst->dev->gso_max_segs), 1);
 		}
 	}
 	sk->sk_gso_max_segs = max_segs;
+	sk_dst_set(sk, dst);
 }
 EXPORT_SYMBOL_GPL(sk_setup_caps);
 
@@ -2570,13 +2598,24 @@ kuid_t sock_i_uid(struct sock *sk)
 }
 EXPORT_SYMBOL(sock_i_uid);
 
+unsigned long __sock_i_ino(struct sock *sk)
+{
+	unsigned long ino;
+
+	read_lock(&sk->sk_callback_lock);
+	ino = sk->sk_socket ? SOCK_INODE(sk->sk_socket)->i_ino : 0;
+	read_unlock(&sk->sk_callback_lock);
+	return ino;
+}
+EXPORT_SYMBOL(__sock_i_ino);
+
 unsigned long sock_i_ino(struct sock *sk)
 {
 	unsigned long ino;
 
-	read_lock_bh(&sk->sk_callback_lock);
-	ino = sk->sk_socket ? SOCK_INODE(sk->sk_socket)->i_ino : 0;
-	read_unlock_bh(&sk->sk_callback_lock);
+	local_bh_disable();
+	ino = __sock_i_ino(sk);
+	local_bh_enable();
 	return ino;
 }
 EXPORT_SYMBOL(sock_i_ino);
@@ -2827,7 +2866,8 @@ static void sk_enter_memory_pressure(struct sock *sk)
 static void sk_leave_memory_pressure(struct sock *sk)
 {
 	if (sk->sk_prot->leave_memory_pressure) {
-		sk->sk_prot->leave_memory_pressure(sk);
+		INDIRECT_CALL_INET_1(sk->sk_prot->leave_memory_pressure,
+				     tcp_leave_memory_pressure, sk);
 	} else {
 		unsigned long *memory_pressure = sk->sk_prot->memory_pressure;
 
@@ -3232,36 +3272,6 @@ void __receive_sock(struct file *file)
 	}
 }
 
-ssize_t sock_no_sendpage(struct socket *sock, struct page *page, int offset, size_t size, int flags)
-{
-	ssize_t res;
-	struct msghdr msg = {.msg_flags = flags};
-	struct kvec iov;
-	char *kaddr = kmap(page);
-	iov.iov_base = kaddr + offset;
-	iov.iov_len = size;
-	res = kernel_sendmsg(sock, &msg, &iov, 1, size);
-	kunmap(page);
-	return res;
-}
-EXPORT_SYMBOL(sock_no_sendpage);
-
-ssize_t sock_no_sendpage_locked(struct sock *sk, struct page *page,
-				int offset, size_t size, int flags)
-{
-	ssize_t res;
-	struct msghdr msg = {.msg_flags = flags};
-	struct kvec iov;
-	char *kaddr = kmap(page);
-
-	iov.iov_base = kaddr + offset;
-	iov.iov_len = size;
-	res = kernel_sendmsg_locked(sk, &msg, &iov, 1, size);
-	kunmap(page);
-	return res;
-}
-EXPORT_SYMBOL(sock_no_sendpage_locked);
-
 /*
  *	Default Socket Callbacks
  */
@@ -3292,6 +3302,8 @@ static void sock_def_error_report(struct sock *sk)
 void sock_def_readable(struct sock *sk)
 {
 	struct socket_wq *wq;
+
+	trace_sk_data_ready(sk);
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
@@ -3381,7 +3393,7 @@ void sk_stop_timer_sync(struct sock *sk, struct timer_list *timer)
 }
 EXPORT_SYMBOL(sk_stop_timer_sync);
 
-void sock_init_data(struct socket *sock, struct sock *sk)
+void sock_init_data_uid(struct socket *sock, struct sock *sk, kuid_t uid)
 {
 	sk_init_common(sk);
 	sk->sk_send_head	=	NULL;
@@ -3401,11 +3413,10 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 		sk->sk_type	=	sock->type;
 		RCU_INIT_POINTER(sk->sk_wq, &sock->wq);
 		sock->sk	=	sk;
-		sk->sk_uid	=	SOCK_INODE(sock)->i_uid;
 	} else {
 		RCU_INIT_POINTER(sk->sk_wq, NULL);
-		sk->sk_uid	=	make_kuid(sock_net(sk)->user_ns, 0);
 	}
+	sk->sk_uid	=	uid;
 
 	rwlock_init(&sk->sk_callback_lock);
 	if (sk->sk_kern_sock)
@@ -3462,6 +3473,16 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	smp_wmb();
 	refcount_set(&sk->sk_refcnt, 1);
 	atomic_set(&sk->sk_drops, 0);
+}
+EXPORT_SYMBOL(sock_init_data_uid);
+
+void sock_init_data(struct socket *sock, struct sock *sk)
+{
+	kuid_t uid = sock ?
+		SOCK_INODE(sock)->i_uid :
+		make_kuid(sock_net(sk)->user_ns, 0);
+
+	sock_init_data_uid(sock, sk, uid);
 }
 EXPORT_SYMBOL(sock_init_data);
 
@@ -3696,8 +3717,6 @@ void sk_common_release(struct sock *sk)
 	sock_orphan(sk);
 
 	xfrm_sk_free_policy(sk);
-
-	sk_refcnt_debug_release(sk);
 
 	sock_put(sk);
 }
@@ -4008,7 +4027,7 @@ static void proto_seq_printf(struct seq_file *seq, struct proto *proto)
 {
 
 	seq_printf(seq, "%-9s %4u %6d  %6ld   %-3s %6u   %-3s  %-10s "
-			"%2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c\n",
+			"%2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c %2c\n",
 		   proto->name,
 		   proto->obj_size,
 		   sock_prot_inuse_get(seq_file_net(seq), proto),
@@ -4029,7 +4048,6 @@ static void proto_seq_printf(struct seq_file *seq, struct proto *proto)
 		   proto_method_implemented(proto->getsockopt),
 		   proto_method_implemented(proto->sendmsg),
 		   proto_method_implemented(proto->recvmsg),
-		   proto_method_implemented(proto->sendpage),
 		   proto_method_implemented(proto->bind),
 		   proto_method_implemented(proto->backlog_rcv),
 		   proto_method_implemented(proto->hash),
@@ -4050,7 +4068,7 @@ static int proto_seq_show(struct seq_file *seq, void *v)
 			   "maxhdr",
 			   "slab",
 			   "module",
-			   "cl co di ac io in de sh ss gs se re sp bi br ha uh gp em\n");
+			   "cl co di ac io in de sh ss gs se re bi br ha uh gp em\n");
 	else
 		proto_seq_printf(seq, list_entry(v, struct proto, node));
 	return 0;
@@ -4110,3 +4128,63 @@ int sock_bind_add(struct sock *sk, struct sockaddr *addr, int addr_len)
 	return sk->sk_prot->bind_add(sk, addr, addr_len);
 }
 EXPORT_SYMBOL(sock_bind_add);
+
+/* Copy 'size' bytes from userspace and return `size` back to userspace */
+int sock_ioctl_inout(struct sock *sk, unsigned int cmd,
+		     void __user *arg, void *karg, size_t size)
+{
+	int ret;
+
+	if (copy_from_user(karg, arg, size))
+		return -EFAULT;
+
+	ret = READ_ONCE(sk->sk_prot)->ioctl(sk, cmd, karg);
+	if (ret)
+		return ret;
+
+	if (copy_to_user(arg, karg, size))
+		return -EFAULT;
+
+	return 0;
+}
+EXPORT_SYMBOL(sock_ioctl_inout);
+
+/* This is the most common ioctl prep function, where the result (4 bytes) is
+ * copied back to userspace if the ioctl() returns successfully. No input is
+ * copied from userspace as input argument.
+ */
+static int sock_ioctl_out(struct sock *sk, unsigned int cmd, void __user *arg)
+{
+	int ret, karg = 0;
+
+	ret = READ_ONCE(sk->sk_prot)->ioctl(sk, cmd, &karg);
+	if (ret)
+		return ret;
+
+	return put_user(karg, (int __user *)arg);
+}
+
+/* A wrapper around sock ioctls, which copies the data from userspace
+ * (depending on the protocol/ioctl), and copies back the result to userspace.
+ * The main motivation for this function is to pass kernel memory to the
+ * protocol ioctl callbacks, instead of userspace memory.
+ */
+int sk_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
+{
+	int rc = 1;
+
+	if (sk->sk_type == SOCK_RAW && sk->sk_family == AF_INET)
+		rc = ipmr_sk_ioctl(sk, cmd, arg);
+	else if (sk->sk_type == SOCK_RAW && sk->sk_family == AF_INET6)
+		rc = ip6mr_sk_ioctl(sk, cmd, arg);
+	else if (sk_is_phonet(sk))
+		rc = phonet_sk_ioctl(sk, cmd, arg);
+
+	/* If ioctl was processed, returns its value */
+	if (rc <= 0)
+		return rc;
+
+	/* Otherwise call the default handler */
+	return sock_ioctl_out(sk, cmd, arg);
+}
+EXPORT_SYMBOL(sk_ioctl);

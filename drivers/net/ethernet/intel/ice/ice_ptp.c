@@ -617,7 +617,7 @@ ice_ptp_is_tx_tracker_up(struct ice_ptp_tx *tx)
 }
 
 /**
- * ice_ptp_tx_tstamp - Process Tx timestamps for a port
+ * ice_ptp_process_tx_tstamp - Process Tx timestamps for a port
  * @tx: the PTP Tx timestamp tracker
  *
  * Process timestamps captured by the PHY associated with this port. To do
@@ -632,15 +632,6 @@ ice_ptp_is_tx_tracker_up(struct ice_ptp_tx *tx)
  * 5) check if the timestamp is stale, and discard if so
  * 6) extend the 40 bit timestamp value to get a 64 bit timestamp value
  * 7) send this 64 bit timestamp to the stack
- *
- * Returns true if all timestamps were handled, and false if any slots remain
- * without a timestamp.
- *
- * After looping, if we still have waiting SKBs, return false. This may cause
- * us effectively poll even when not strictly necessary. We do this because
- * it's possible a new timestamp was requested around the same time as the
- * interrupt. In some cases hardware might not interrupt us again when the
- * timestamp is captured.
  *
  * Note that we do not hold the tracking lock while reading the Tx timestamp.
  * This is because reading the timestamp requires taking a mutex that might
@@ -673,18 +664,18 @@ ice_ptp_is_tx_tracker_up(struct ice_ptp_tx *tx)
  * the packet will never be sent by hardware and discard it without reading
  * the timestamp register.
  */
-static bool ice_ptp_tx_tstamp(struct ice_ptp_tx *tx)
+static void ice_ptp_process_tx_tstamp(struct ice_ptp_tx *tx)
 {
 	struct ice_ptp_port *ptp_port;
-	bool more_timestamps;
 	struct ice_pf *pf;
 	struct ice_hw *hw;
 	u64 tstamp_ready;
+	bool link_up;
 	int err;
 	u8 idx;
 
 	if (!tx->init)
-		return true;
+		return;
 
 	ptp_port = container_of(tx, struct ice_ptp_port, tx);
 	pf = ptp_port_to_pf(ptp_port);
@@ -693,13 +684,16 @@ static bool ice_ptp_tx_tstamp(struct ice_ptp_tx *tx)
 	/* Read the Tx ready status first */
 	err = ice_get_phy_tx_tstamp_ready(hw, tx->block, &tstamp_ready);
 	if (err)
-		return false;
+		return;
+
+	/* Drop packets if the link went down */
+	link_up = ptp_port->link_up;
 
 	for_each_set_bit(idx, tx->in_use, tx->len) {
 		struct skb_shared_hwtstamps shhwtstamps = {};
 		u8 phy_idx = idx + tx->offset;
 		u64 raw_tstamp = 0, tstamp;
-		bool drop_ts = false;
+		bool drop_ts = !link_up;
 		struct sk_buff *skb;
 
 		/* Drop packets which have waited for more than 2 seconds */
@@ -728,7 +722,7 @@ static bool ice_ptp_tx_tstamp(struct ice_ptp_tx *tx)
 		ice_trace(tx_tstamp_fw_req, tx->tstamps[idx].skb, idx);
 
 		err = ice_read_phy_tstamp(hw, tx->block, phy_idx, &raw_tstamp);
-		if (err)
+		if (err && !drop_ts)
 			continue;
 
 		ice_trace(tx_tstamp_fw_done, tx->tstamps[idx].skb, idx);
@@ -778,15 +772,34 @@ skip_ts_read:
 		skb_tstamp_tx(skb, &shhwtstamps);
 		dev_kfree_skb_any(skb);
 	}
+}
 
-	/* Check if we still have work to do. If so, re-queue this task to
-	 * poll for remaining timestamps.
-	 */
+/**
+ * ice_ptp_tx_tstamp - Process Tx timestamps for this function.
+ * @tx: Tx tracking structure to initialize
+ *
+ * Returns: ICE_TX_TSTAMP_WORK_PENDING if there are any outstanding incomplete
+ * Tx timestamps, or ICE_TX_TSTAMP_WORK_DONE otherwise.
+ */
+static enum ice_tx_tstamp_work ice_ptp_tx_tstamp(struct ice_ptp_tx *tx)
+{
+	bool more_timestamps;
+
+	if (!tx->init)
+		return ICE_TX_TSTAMP_WORK_DONE;
+
+	/* Process the Tx timestamp tracker */
+	ice_ptp_process_tx_tstamp(tx);
+
+	/* Check if there are outstanding Tx timestamps */
 	spin_lock(&tx->lock);
 	more_timestamps = tx->init && !bitmap_empty(tx->in_use, tx->len);
 	spin_unlock(&tx->lock);
 
-	return !more_timestamps;
+	if (more_timestamps)
+		return ICE_TX_TSTAMP_WORK_PENDING;
+
+	return ICE_TX_TSTAMP_WORK_DONE;
 }
 
 /**
@@ -907,7 +920,7 @@ ice_ptp_release_tx_tracker(struct ice_pf *pf, struct ice_ptp_tx *tx)
 	spin_unlock(&tx->lock);
 
 	/* wait for potentially outstanding interrupt to complete */
-	synchronize_irq(pf->msix_entries[pf->oicr_idx].vector);
+	synchronize_irq(pf->oicr_irq.virq);
 
 	ice_ptp_flush_tx_tracker(pf, tx);
 
@@ -1454,15 +1467,11 @@ static int ice_ptp_adjfine(struct ptp_clock_info *info, long scaled_ppm)
 }
 
 /**
- * ice_ptp_extts_work - Workqueue task function
- * @work: external timestamp work structure
- *
- * Service for PTP external clock event
+ * ice_ptp_extts_event - Process PTP external clock event
+ * @pf: Board private structure
  */
-static void ice_ptp_extts_work(struct kthread_work *work)
+void ice_ptp_extts_event(struct ice_pf *pf)
 {
-	struct ice_ptp *ptp = container_of(work, struct ice_ptp, extts_work);
-	struct ice_pf *pf = container_of(ptp, struct ice_pf, ptp);
 	struct ptp_clock_event event;
 	struct ice_hw *hw = &pf->hw;
 	u8 chan, tmr_idx;
@@ -1761,6 +1770,38 @@ ice_ptp_gpio_enable_e810(struct ptp_clock_info *info,
 
 		err = ice_ptp_cfg_extts(pf, !!on, chan, gpio_pin,
 					rq->extts.flags);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return err;
+}
+
+/**
+ * ice_ptp_gpio_enable_e823 - Enable/disable ancillary features of PHC
+ * @info: the driver's PTP info structure
+ * @rq: The requested feature to change
+ * @on: Enable/disable flag
+ */
+static int ice_ptp_gpio_enable_e823(struct ptp_clock_info *info,
+				    struct ptp_clock_request *rq, int on)
+{
+	struct ice_pf *pf = ptp_info_to_pf(info);
+	struct ice_perout_channel clk_cfg = {0};
+	int err;
+
+	switch (rq->type) {
+	case PTP_CLK_REQ_PPS:
+		clk_cfg.gpio_pin = PPS_PIN_INDEX;
+		clk_cfg.period = NSEC_PER_SEC;
+		clk_cfg.ena = !!on;
+
+		err = ice_ptp_cfg_clkout(pf, PPS_CLK_GEN_CHAN, &clk_cfg, true);
+		break;
+	case PTP_CLK_REQ_EXTTS:
+		err = ice_ptp_cfg_extts(pf, !!on, rq->extts.index,
+					TIME_SYNC_PIN_INDEX, rq->extts.flags);
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -2221,6 +2262,19 @@ ice_ptp_setup_pins_e810(struct ice_pf *pf, struct ptp_clock_info *info)
 }
 
 /**
+ * ice_ptp_setup_pins_e823 - Setup PTP pins in sysfs
+ * @pf: pointer to the PF instance
+ * @info: PTP clock capabilities
+ */
+static void
+ice_ptp_setup_pins_e823(struct ice_pf *pf, struct ptp_clock_info *info)
+{
+	info->pps = 1;
+	info->n_per_out = 0;
+	info->n_ext_ts = 1;
+}
+
+/**
  * ice_ptp_set_funcs_e822 - Set specialized functions for E822 support
  * @pf: Board private structure
  * @info: PTP info to fill
@@ -2258,6 +2312,23 @@ ice_ptp_set_funcs_e810(struct ice_pf *pf, struct ptp_clock_info *info)
 }
 
 /**
+ * ice_ptp_set_funcs_e823 - Set specialized functions for E823 support
+ * @pf: Board private structure
+ * @info: PTP info to fill
+ *
+ * Assign functions to the PTP capabiltiies structure for E823 devices.
+ * Functions which operate across all device families should be set directly
+ * in ice_ptp_set_caps. Only add functions here which are distinct for e823
+ * devices.
+ */
+static void
+ice_ptp_set_funcs_e823(struct ice_pf *pf, struct ptp_clock_info *info)
+{
+	info->enable = ice_ptp_gpio_enable_e823;
+	ice_ptp_setup_pins_e823(pf, info);
+}
+
+/**
  * ice_ptp_set_caps - Set PTP capabilities
  * @pf: Board private structure
  */
@@ -2269,7 +2340,7 @@ static void ice_ptp_set_caps(struct ice_pf *pf)
 	snprintf(info->name, sizeof(info->name) - 1, "%s-%s-clk",
 		 dev_driver_string(dev), dev_name(dev));
 	info->owner = THIS_MODULE;
-	info->max_adj = 999999999;
+	info->max_adj = 100000000;
 	info->adjtime = ice_ptp_adjtime;
 	info->adjfine = ice_ptp_adjfine;
 	info->gettimex64 = ice_ptp_gettimex64;
@@ -2277,6 +2348,8 @@ static void ice_ptp_set_caps(struct ice_pf *pf)
 
 	if (ice_is_e810(&pf->hw))
 		ice_ptp_set_funcs_e810(pf, info);
+	else if (ice_is_e823(&pf->hw))
+		ice_ptp_set_funcs_e823(pf, info);
 	else
 		ice_ptp_set_funcs_e822(pf, info);
 }
@@ -2362,9 +2435,10 @@ s8 ice_ptp_request_ts(struct ice_ptp_tx *tx, struct sk_buff *skb)
  * ice_ptp_process_ts - Process the PTP Tx timestamps
  * @pf: Board private structure
  *
- * Returns true if timestamps are processed.
+ * Returns: ICE_TX_TSTAMP_WORK_PENDING if there are any outstanding Tx
+ * timestamps that need processing, and ICE_TX_TSTAMP_WORK_DONE otherwise.
  */
-bool ice_ptp_process_ts(struct ice_pf *pf)
+enum ice_tx_tstamp_work ice_ptp_process_ts(struct ice_pf *pf)
 {
 	return ice_ptp_tx_tstamp(&pf->ptp.port.tx);
 }
@@ -2490,7 +2564,6 @@ void ice_ptp_prepare_for_reset(struct ice_pf *pf)
 	ice_ptp_cfg_timestamp(pf, false);
 
 	kthread_cancel_delayed_work_sync(&ptp->work);
-	kthread_cancel_work_sync(&ptp->extts_work);
 
 	if (test_bit(ICE_PFR_REQ, pf->state))
 		return;
@@ -2588,7 +2661,6 @@ static int ice_ptp_init_work(struct ice_pf *pf, struct ice_ptp *ptp)
 
 	/* Initialize work functions */
 	kthread_init_delayed_work(&ptp->work, ice_ptp_periodic_work);
-	kthread_init_work(&ptp->extts_work, ice_ptp_extts_work);
 
 	/* Allocate a kworker for handling work required for the ports
 	 * connected to the PTP hardware clock.

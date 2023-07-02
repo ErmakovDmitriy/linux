@@ -36,7 +36,7 @@ static const struct ata_port_info ahci_port_info_nolpm = {
 	.port_ops	= &ahci_platform_ops,
 };
 
-static struct scsi_host_template ahci_platform_sht = {
+static const struct scsi_host_template ahci_platform_sht = {
 	AHCI_SHT(DRV_NAME),
 };
 
@@ -96,7 +96,7 @@ MODULE_DEVICE_TABLE(acpi, ahci_acpi_match);
 
 static struct platform_driver ahci_driver = {
 	.probe = ahci_probe,
-	.remove = ata_platform_remove_one,
+	.remove_new = ata_platform_remove_one,
 	.shutdown = ahci_platform_shutdown,
 	.driver = {
 		.name = DRV_NAME,

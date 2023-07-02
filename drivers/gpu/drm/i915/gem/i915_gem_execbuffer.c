@@ -379,22 +379,25 @@ eb_vma_misplaced(const struct drm_i915_gem_exec_object2 *entry,
 		 const struct i915_vma *vma,
 		 unsigned int flags)
 {
-	if (vma->node.size < entry->pad_to_size)
+	const u64 start = i915_vma_offset(vma);
+	const u64 size = i915_vma_size(vma);
+
+	if (size < entry->pad_to_size)
 		return true;
 
-	if (entry->alignment && !IS_ALIGNED(vma->node.start, entry->alignment))
+	if (entry->alignment && !IS_ALIGNED(start, entry->alignment))
 		return true;
 
 	if (flags & EXEC_OBJECT_PINNED &&
-	    vma->node.start != entry->offset)
+	    start != entry->offset)
 		return true;
 
 	if (flags & __EXEC_OBJECT_NEEDS_BIAS &&
-	    vma->node.start < BATCH_OFFSET_BIAS)
+	    start < BATCH_OFFSET_BIAS)
 		return true;
 
 	if (!(flags & EXEC_OBJECT_SUPPORTS_48B_ADDRESS) &&
-	    (vma->node.start + vma->node.size + 4095) >> 32)
+	    (start + size + 4095) >> 32)
 		return true;
 
 	if (flags & __EXEC_OBJECT_NEEDS_MAP &&
@@ -440,7 +443,7 @@ eb_pin_vma(struct i915_execbuffer *eb,
 	int err;
 
 	if (vma->node.size)
-		pin_flags = vma->node.start;
+		pin_flags =  __i915_vma_offset(vma);
 	else
 		pin_flags = entry->offset & PIN_OFFSET_MASK;
 
@@ -637,9 +640,15 @@ static inline int use_cpu_reloc(const struct reloc_cache *cache,
 	if (DBG_FORCE_RELOC == FORCE_GTT_RELOC)
 		return false;
 
+	/*
+	 * For objects created by userspace through GEM_CREATE with pat_index
+	 * set by set_pat extension, i915_gem_object_has_cache_level() always
+	 * return true, otherwise the call would fall back to checking whether
+	 * the object is un-cached.
+	 */
 	return (cache->has_llc ||
 		obj->cache_dirty ||
-		obj->cache_level != I915_CACHE_NONE);
+		!i915_gem_object_has_cache_level(obj, I915_CACHE_NONE));
 }
 
 static int eb_reserve_vma(struct i915_execbuffer *eb,
@@ -663,8 +672,8 @@ static int eb_reserve_vma(struct i915_execbuffer *eb,
 	if (err)
 		return err;
 
-	if (entry->offset != vma->node.start) {
-		entry->offset = vma->node.start | UPDATE;
+	if (entry->offset != i915_vma_offset(vma)) {
+		entry->offset = i915_vma_offset(vma) | UPDATE;
 		eb->args->flags |= __EXEC_HAS_RELOC;
 	}
 
@@ -727,7 +736,6 @@ static int eb_reserve(struct i915_execbuffer *eb)
 	struct eb_vma *ev;
 	unsigned int pass;
 	int err = 0;
-	bool unpinned;
 
 	/*
 	 * We have one more buffers that we couldn't bind, which could be due to
@@ -767,7 +775,7 @@ static int eb_reserve(struct i915_execbuffer *eb)
 			pin_flags |= PIN_NONBLOCK;
 
 		if (pass >= 1)
-			unpinned = eb_unbind(eb, pass >= 2);
+			eb_unbind(eb, pass >= 2);
 
 		if (pass == 2) {
 			err = mutex_lock_interruptible(&eb->context->vm->mutex);
@@ -906,7 +914,7 @@ static struct i915_vma *eb_lookup_vma(struct i915_execbuffer *eb, u32 handle)
 		 */
 		if (i915_gem_context_uses_protected_content(eb->gem_context) &&
 		    i915_gem_object_is_protected(obj)) {
-			err = intel_pxp_key_check(&vm->gt->pxp, obj, true);
+			err = intel_pxp_key_check(eb->i915->pxp, obj, true);
 			if (err) {
 				i915_gem_object_put(obj);
 				return ERR_PTR(err);
@@ -1021,8 +1029,8 @@ static int eb_validate_vmas(struct i915_execbuffer *eb)
 			return err;
 
 		if (!err) {
-			if (entry->offset != vma->node.start) {
-				entry->offset = vma->node.start | UPDATE;
+			if (entry->offset != i915_vma_offset(vma)) {
+				entry->offset = i915_vma_offset(vma) | UPDATE;
 				eb->args->flags |= __EXEC_HAS_RELOC;
 			}
 		} else {
@@ -1103,7 +1111,7 @@ static inline u64
 relocation_target(const struct drm_i915_gem_relocation_entry *reloc,
 		  const struct i915_vma *target)
 {
-	return gen8_canonical_addr((int)reloc->delta + target->node.start);
+	return gen8_canonical_addr((int)reloc->delta + i915_vma_offset(target));
 }
 
 static void reloc_cache_init(struct reloc_cache *cache,
@@ -1312,7 +1320,7 @@ static void *reloc_iomap(struct i915_vma *batch,
 			if (err) /* no inactive aperture space, use cpu reloc */
 				return NULL;
 		} else {
-			cache->node.start = vma->node.start;
+			cache->node.start = i915_ggtt_offset(vma);
 			cache->node.mm = (void *)vma;
 		}
 	}
@@ -1321,7 +1329,10 @@ static void *reloc_iomap(struct i915_vma *batch,
 	if (drm_mm_node_allocated(&cache->node)) {
 		ggtt->vm.insert_page(&ggtt->vm,
 				     i915_gem_object_get_dma_address(obj, page),
-				     offset, I915_CACHE_NONE, 0);
+				     offset,
+				     i915_gem_get_pat_index(ggtt->vm.i915,
+							    I915_CACHE_NONE),
+				     0);
 	} else {
 		offset += page << PAGE_SHIFT;
 	}
@@ -1461,7 +1472,7 @@ eb_relocate_entry(struct i915_execbuffer *eb,
 			reloc_cache_unmap(&eb->reloc_cache);
 			mutex_lock(&vma->vm->mutex);
 			err = i915_vma_bind(target->vma,
-					    target->vma->obj->cache_level,
+					    target->vma->obj->pat_index,
 					    PIN_GLOBAL, NULL, NULL);
 			mutex_unlock(&vma->vm->mutex);
 			reloc_cache_remap(&eb->reloc_cache, ev->vma->obj);
@@ -1475,7 +1486,7 @@ eb_relocate_entry(struct i915_execbuffer *eb,
 	 * more work needs to be done.
 	 */
 	if (!DBG_FORCE_RELOC &&
-	    gen8_canonical_addr(target->vma->node.start) == reloc->presumed_offset)
+	    gen8_canonical_addr(i915_vma_offset(target->vma)) == reloc->presumed_offset)
 		return 0;
 
 	/* Check that the relocation address is valid... */
@@ -2405,7 +2416,7 @@ static int eb_request_submit(struct i915_execbuffer *eb,
 	}
 
 	err = rq->context->engine->emit_bb_start(rq,
-						 batch->node.start +
+						 i915_vma_offset(batch) +
 						 eb->batch_start_offset,
 						 batch_len,
 						 eb->batch_flags);
@@ -2416,7 +2427,7 @@ static int eb_request_submit(struct i915_execbuffer *eb,
 		GEM_BUG_ON(intel_context_is_parallel(rq->context));
 		GEM_BUG_ON(eb->batch_start_offset);
 		err = rq->context->engine->emit_bb_start(rq,
-							 eb->trampoline->node.start +
+							 i915_vma_offset(eb->trampoline) +
 							 batch_len, 0, 0);
 		if (err)
 			return err;
@@ -2446,11 +2457,6 @@ static int eb_submit(struct i915_execbuffer *eb)
 	return err;
 }
 
-static int num_vcs_engines(struct drm_i915_private *i915)
-{
-	return hweight_long(VDBOX_MASK(to_gt(i915)));
-}
-
 /*
  * Find one BSD ring to dispatch the corresponding BSD command.
  * The engine index is returned.
@@ -2464,7 +2470,7 @@ gen8_dispatch_bsd_engine(struct drm_i915_private *dev_priv,
 	/* Check whether the file_priv has already selected one ring. */
 	if ((int)file_priv->bsd_engine < 0)
 		file_priv->bsd_engine =
-			get_random_u32_below(num_vcs_engines(dev_priv));
+			get_random_u32_below(dev_priv->engine_uabi_class_count[I915_ENGINE_CLASS_VIDEO]);
 
 	return file_priv->bsd_engine;
 }
@@ -2652,7 +2658,8 @@ eb_select_legacy_ring(struct i915_execbuffer *eb)
 		return -1;
 	}
 
-	if (user_ring_id == I915_EXEC_BSD && num_vcs_engines(i915) > 1) {
+	if (user_ring_id == I915_EXEC_BSD &&
+	    i915->engine_uabi_class_count[I915_ENGINE_CLASS_VIDEO] > 1) {
 		unsigned int bsd_idx = args->flags & I915_EXEC_BSD_MASK;
 
 		if (bsd_idx == I915_EXEC_BSD_DEFAULT) {

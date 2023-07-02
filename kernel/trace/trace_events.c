@@ -194,6 +194,8 @@ static int trace_define_generic_fields(void)
 	__generic_field(int, common_cpu, FILTER_CPU);
 	__generic_field(char *, COMM, FILTER_COMM);
 	__generic_field(char *, comm, FILTER_COMM);
+	__generic_field(char *, stacktrace, FILTER_STACKTRACE);
+	__generic_field(char *, STACKTRACE, FILTER_STACKTRACE);
 
 	return ret;
 }
@@ -2281,8 +2283,6 @@ create_new_subsystem(const char *name)
 	if (!system->name)
 		goto out_free;
 
-	system->filter = NULL;
-
 	system->filter = kzalloc(sizeof(struct event_filter), GFP_KERNEL);
 	if (!system->filter)
 		goto out_free;
@@ -2833,7 +2833,7 @@ static __init int setup_trace_triggers(char *str)
 	char *buf;
 	int i;
 
-	strlcpy(bootup_trigger_buf, str, COMMAND_LINE_SIZE);
+	strscpy(bootup_trigger_buf, str, COMMAND_LINE_SIZE);
 	ring_buffer_expanded = true;
 	disable_tracing_selftest("running event triggers");
 
@@ -2843,7 +2843,7 @@ static __init int setup_trace_triggers(char *str)
 		if (!trigger)
 			break;
 		bootup_triggers[i].event = strsep(&trigger, ".");
-		bootup_triggers[i].trigger = strsep(&trigger, ".");
+		bootup_triggers[i].trigger = trigger;
 		if (!bootup_triggers[i].trigger)
 			break;
 	}
@@ -3623,7 +3623,7 @@ static char bootup_event_buf[COMMAND_LINE_SIZE] __initdata;
 
 static __init int setup_trace_event(char *str)
 {
-	strlcpy(bootup_event_buf, str, COMMAND_LINE_SIZE);
+	strscpy(bootup_event_buf, str, COMMAND_LINE_SIZE);
 	ring_buffer_expanded = true;
 	disable_tracing_selftest("running event tracing");
 
@@ -3771,10 +3771,9 @@ static __init int event_trace_memsetup(void)
 	return 0;
 }
 
-static __init void
-early_enable_events(struct trace_array *tr, bool disable_first)
+__init void
+early_enable_events(struct trace_array *tr, char *buf, bool disable_first)
 {
-	char *buf = bootup_event_buf;
 	char *token;
 	int ret;
 
@@ -3827,7 +3826,7 @@ static __init int event_trace_enable(void)
 	 */
 	__trace_early_add_events(tr);
 
-	early_enable_events(tr, false);
+	early_enable_events(tr, bootup_event_buf, false);
 
 	trace_printk_start_comm();
 
@@ -3855,7 +3854,7 @@ static __init int event_trace_enable_again(void)
 	if (!tr)
 		return -ENODEV;
 
-	early_enable_events(tr, true);
+	early_enable_events(tr, bootup_event_buf, true);
 
 	return 0;
 }

@@ -137,6 +137,10 @@ struct i915_power_domains {
 	bool display_core_suspended;
 	int power_well_count;
 
+	u32 dc_state;
+	u32 target_dc_state;
+	u32 allowed_dc_mask;
+
 	intel_wakeref_t init_wakeref;
 	intel_wakeref_t disable_wakeref;
 
@@ -167,8 +171,7 @@ void intel_power_domains_init_hw(struct drm_i915_private *dev_priv, bool resume)
 void intel_power_domains_driver_remove(struct drm_i915_private *dev_priv);
 void intel_power_domains_enable(struct drm_i915_private *dev_priv);
 void intel_power_domains_disable(struct drm_i915_private *dev_priv);
-void intel_power_domains_suspend(struct drm_i915_private *dev_priv,
-				 enum i915_drm_suspend_mode);
+void intel_power_domains_suspend(struct drm_i915_private *dev_priv, bool s2idle);
 void intel_power_domains_resume(struct drm_i915_private *dev_priv);
 void intel_power_domains_sanitize_state(struct drm_i915_private *dev_priv);
 
