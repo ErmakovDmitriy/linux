@@ -7,6 +7,11 @@
 #include "peer.h"
 #include "noise.h"
 
+static const struct rhashtable_params index_ht_params = {
+	.head_offset = offsetof(struct index_hashtable_entry, index_hash),
+	.key_offset = offsetof(struct index_hashtable_entry, index),
+};
+
 static struct hlist_head *pubkey_bucket(struct pubkey_hashtable *table,
 					const u8 pubkey[NOISE_PUBLIC_KEY_LEN])
 {
@@ -87,7 +92,11 @@ struct index_hashtable *wg_index_hashtable_alloc(void)
 	if (!table)
 		return NULL;
 
-	hash_init(table->hashtable);
+	if (rhashtable_init(table->rhashtable, &index_ht_params)) {
+		kvfree(table);
+		return NULL;
+	}
+
 	spin_lock_init(&table->lock);
 	return table;
 }
