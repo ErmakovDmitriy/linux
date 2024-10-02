@@ -4,8 +4,42 @@
  */
 
 #include "peerlookup.h"
+#include "linux/compiler.h"
+#include "linux/rcupdate.h"
+#include "linux/rhashtable-types.h"
+#include "linux/rhashtable.h"
+#include "linux/siphash.h"
 #include "peer.h"
 #include "noise.h"
+
+static const struct rhashtable_params index_ht_params = {
+	.head_offset = offsetof(struct index_hashtable_entry, index_hash),
+	.key_offset = offsetof(struct index_hashtable_entry, index),
+	.key_len = sizeof(__le32),
+	.automatic_shrinking = true,
+};
+
+static inline u32 wg_peer_obj_hashfn(const void *data, u32 len, u32 seed)
+{
+  struct wg_peer* peer = data;
+
+	return 0;
+}
+
+static inline int wg_peer_cmpfn(struct rhashtable_compare_arg *arg,
+				const void *obj)
+{
+  return 0;
+}
+
+static const struct rhashtable_params pubkey_ht_params = {
+	.head_offset = offsetof(struct wg_peer, pubkey_hash),
+	.key_offset = offsetof(struct wg_peer, handshake),
+	.key_len = sizeof(struct noise_handshake),
+	.obj_hashfn = wg_peer_obj_hashfn,
+	.obj_cmpfn = wg_peer_cmpfn,
+	.automatic_shrinking = true,
+};
 
 static struct hlist_head *pubkey_bucket(struct pubkey_hashtable *table,
 					const u8 pubkey[NOISE_PUBLIC_KEY_LEN])
@@ -36,6 +70,8 @@ void wg_pubkey_hashtable_add(struct pubkey_hashtable *table,
 			     struct wg_peer *peer)
 {
 	mutex_lock(&table->lock);
+	//	rhashtable_insert_fast(struct rhashtable *ht, struct rhash_head *obj, const struct rhashtable_params params)
+	rhashtable_insert_slow();
 	hlist_add_head_rcu(&peer->pubkey_hash,
 			   pubkey_bucket(table, peer->handshake.remote_static));
 	mutex_unlock(&table->lock);
@@ -70,16 +106,6 @@ wg_pubkey_hashtable_lookup(struct pubkey_hashtable *table,
 	return peer;
 }
 
-static struct hlist_head *index_bucket(struct index_hashtable *table,
-				       const __le32 index)
-{
-	/* Since the indices are random and thus all bits are uniformly
-	 * distributed, we can find its bucket simply by masking.
-	 */
-	return &table->hashtable[(__force u32)index &
-				 (HASH_SIZE(table->hashtable) - 1)];
-}
-
 struct index_hashtable *wg_index_hashtable_alloc(void)
 {
 	struct index_hashtable *table = kvmalloc(sizeof(*table), GFP_KERNEL);
@@ -87,7 +113,11 @@ struct index_hashtable *wg_index_hashtable_alloc(void)
 	if (!table)
 		return NULL;
 
-	hash_init(table->hashtable);
+	if (rhashtable_init(&table->rhashtable, &index_ht_params)) {
+		kvfree(table);
+		return NULL;
+	}
+
 	spin_lock_init(&table->lock);
 	return table;
 }
@@ -119,10 +149,8 @@ struct index_hashtable *wg_index_hashtable_alloc(void)
 __le32 wg_index_hashtable_insert(struct index_hashtable *table,
 				 struct index_hashtable_entry *entry)
 {
-	struct index_hashtable_entry *existing_entry;
-
 	spin_lock_bh(&table->lock);
-	hlist_del_init_rcu(&entry->index_hash);
+	rhashtable_remove_fast(&table->rhashtable, &entry->index_hash, index_ht_params);
 	spin_unlock_bh(&table->lock);
 
 	rcu_read_lock_bh();
@@ -130,32 +158,26 @@ __le32 wg_index_hashtable_insert(struct index_hashtable *table,
 search_unused_slot:
 	/* First we try to find an unused slot, randomly, while unlocked. */
 	entry->index = (__force __le32)get_random_u32();
-	hlist_for_each_entry_rcu_bh(existing_entry,
-				    index_bucket(table, entry->index),
-				    index_hash) {
-		if (existing_entry->index == entry->index)
-			/* If it's already in use, we continue searching. */
-			goto search_unused_slot;
+	if (rhashtable_lookup(&table->rhashtable, &entry->index, index_ht_params)) {
+		/* If it's already in use, we continue searching. */
+		goto search_unused_slot;
 	}
 
 	/* Once we've found an unused slot, we lock it, and then double-check
 	 * that nobody else stole it from us.
 	 */
 	spin_lock_bh(&table->lock);
-	hlist_for_each_entry_rcu_bh(existing_entry,
-				    index_bucket(table, entry->index),
-				    index_hash) {
-		if (existing_entry->index == entry->index) {
-			spin_unlock_bh(&table->lock);
-			/* If it was stolen, we start over. */
-			goto search_unused_slot;
-		}
+	if (rhashtable_lookup(&table->rhashtable, &entry->index,
+			      index_ht_params)) {
+		spin_unlock_bh(&table->lock);
+		/* If it was stolen, we start over. */
+		goto search_unused_slot;
 	}
+
 	/* Otherwise, we know we have it exclusively (since we're locked),
 	 * so we insert.
 	 */
-	hlist_add_head_rcu(&entry->index_hash,
-			   index_bucket(table, entry->index));
+	rhashtable_insert_fast(&table->rhashtable, &entry->index_hash, index_ht_params);
 	spin_unlock_bh(&table->lock);
 
 	rcu_read_unlock_bh();
@@ -170,20 +192,14 @@ bool wg_index_hashtable_replace(struct index_hashtable *table,
 	bool ret;
 
 	spin_lock_bh(&table->lock);
-	ret = !hlist_unhashed(&old->index_hash);
+	ret = rhashtable_lookup_fast(&table->rhashtable, &old->index, index_ht_params);
 	if (unlikely(!ret))
 		goto out;
 
 	new->index = old->index;
-	hlist_replace_rcu(&old->index_hash, &new->index_hash);
+	rhashtable_replace_fast(&table->rhashtable, &old->index_hash,
+				&new->index_hash, index_ht_params);
 
-	/* Calling init here NULLs out index_hash, and in fact after this
-	 * function returns, it's theoretically possible for this to get
-	 * reinserted elsewhere. That means the RCU lookup below might either
-	 * terminate early or jump between buckets, in which case the packet
-	 * simply gets dropped, which isn't terrible.
-	 */
-	INIT_HLIST_NODE(&old->index_hash);
 out:
 	spin_unlock_bh(&table->lock);
 	return ret;
@@ -193,7 +209,7 @@ void wg_index_hashtable_remove(struct index_hashtable *table,
 			       struct index_hashtable_entry *entry)
 {
 	spin_lock_bh(&table->lock);
-	hlist_del_init_rcu(&entry->index_hash);
+	rhashtable_remove_fast(&table->rhashtable, &entry->index_hash, index_ht_params);
 	spin_unlock_bh(&table->lock);
 }
 
@@ -203,18 +219,16 @@ wg_index_hashtable_lookup(struct index_hashtable *table,
 			  const enum index_hashtable_type type_mask,
 			  const __le32 index, struct wg_peer **peer)
 {
-	struct index_hashtable_entry *iter_entry, *entry = NULL;
+	struct index_hashtable_entry *entry = NULL;
 
 	rcu_read_lock_bh();
-	hlist_for_each_entry_rcu_bh(iter_entry, index_bucket(table, index),
-				    index_hash) {
-		if (iter_entry->index == index) {
-			if (likely(iter_entry->type & type_mask))
-				entry = iter_entry;
-			break;
-		}
+	entry = rhashtable_lookup(&table->rhashtable, &index, index_ht_params);
+	if (unlikely(!entry)) {
+		rcu_read_unlock_bh();
+		return entry;
 	}
-	if (likely(entry)) {
+
+	if (likely(entry && (entry->type & type_mask))) {
 		entry->peer = wg_peer_get_maybe_zero(entry->peer);
 		if (likely(entry->peer))
 			*peer = entry->peer;

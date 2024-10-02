@@ -6,17 +6,18 @@
 #ifndef _WG_PEERLOOKUP_H
 #define _WG_PEERLOOKUP_H
 
+#include "linux/rhashtable-types.h"
 #include "messages.h"
 
 #include <linux/hashtable.h>
 #include <linux/mutex.h>
 #include <linux/siphash.h>
+#include <linux/rhashtable.h>
 
 struct wg_peer;
 
 struct pubkey_hashtable {
-	/* TODO: move to rhashtable */
-	DECLARE_HASHTABLE(hashtable, 11);
+	struct rhashtable rhashtable;
 	siphash_key_t key;
 	struct mutex lock;
 };
@@ -31,8 +32,7 @@ wg_pubkey_hashtable_lookup(struct pubkey_hashtable *table,
 			   const u8 pubkey[NOISE_PUBLIC_KEY_LEN]);
 
 struct index_hashtable {
-	/* TODO: move to rhashtable */
-	DECLARE_HASHTABLE(hashtable, 13);
+	struct rhashtable rhashtable;
 	spinlock_t lock;
 };
 
@@ -43,7 +43,7 @@ enum index_hashtable_type {
 
 struct index_hashtable_entry {
 	struct wg_peer *peer;
-	struct hlist_node index_hash;
+	struct rhash_head index_hash;
 	enum index_hashtable_type type;
 	__le32 index;
 };
